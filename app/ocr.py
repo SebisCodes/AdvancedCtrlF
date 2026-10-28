@@ -7,8 +7,11 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
-import tempfile
+import subprocess
+import time
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -34,6 +37,57 @@ def _system_tessdata() -> list[Path]:
     return cands
 
 
+MIRROR = "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{lang}.traineddata"
+
+
+def _fetch_python(url: str, dest: Path) -> None:
+    req = urllib.request.Request(url, headers={"User-Agent": "AdvancedCtrlF"})
+    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
+        shutil.copyfileobj(r, f)
+
+
+def _fetch_powershell(url: str, dest: Path) -> None:
+    """Windows only: download with PowerShell (WinINet proxy settings + Windows credentials).
+    URL and target are passed via environment variables - nothing is pasted into the command."""
+    script = ("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
+              "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
+              "$p=[Net.WebRequest]::DefaultWebProxy; if ($p) { $p.Credentials=[Net.CredentialCache]::DefaultNetworkCredentials }; "
+              "Invoke-WebRequest -UseBasicParsing -UseDefaultCredentials -Uri $env:ACF_URL -OutFile $env:ACF_OUT")
+    env = dict(os.environ, ACF_URL=url, ACF_OUT=str(dest))
+    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
+                       env=env, capture_output=True, text=True, timeout=300, creationflags=0x08000000)  # no window
+    if r.returncode != 0:
+        msg = re.sub(r"\x1b\[[0-9;]*m", "", (r.stderr or r.stdout)).strip()   # drop colour codes
+        raise RuntimeError(msg.splitlines()[0] if msg else f"PowerShell exit code {r.returncode}")
+
+
+def _check_traineddata(path: Path) -> None:
+    size = path.stat().st_size
+    with open(path, "rb") as f:
+        head = f.read(64).lstrip()
+    if size < MIN_SIZE or head[:1] == b"<":   # an HTML error/login page instead of the model
+        raise RuntimeError(f"received an invalid file ({size} bytes) - possibly a proxy or login page")
+
+
+def _replace(src: Path, dst: Path) -> None:
+    """os.replace with retries: virus scanners briefly lock freshly written files on Windows."""
+    for attempt in range(10):
+        try:
+            os.replace(src, dst)
+            return
+        except PermissionError:
+            if attempt == 9:
+                raise
+            time.sleep(0.5)
+
+
+def _remove(path: Path) -> None:
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 class OcrEngine:
     def __init__(self, own_dir: Path, dpi: int = 300, url_template: str = "") -> None:
         self.own_dir = own_dir
@@ -55,26 +109,42 @@ class OcrEngine:
         return self.tessdata() is not None
 
     def download(self, progress=lambda msg: None) -> None:
+        """Download eng/deu.traineddata. Tries every source with every method until one works:
+        Python (urllib), then - on Windows - PowerShell, which uses the Windows network stack incl.
+        company proxies that need Windows authentication; then a CDN mirror if github.com is blocked."""
         self.own_dir.mkdir(parents=True, exist_ok=True)
+        for stale in self.own_dir.glob("*.part"):   # leftovers of interrupted downloads
+            _remove(stale)
+        urls = [u for u in dict.fromkeys([self.url_template, MIRROR]) if u]
+        methods = [("Python", _fetch_python)] + ([("PowerShell", _fetch_powershell)] if os.name == "nt" else [])
         for l in LANGS:
             target = self.own_dir / f"{l}.traineddata"
             if target.is_file() and target.stat().st_size >= MIN_SIZE:
                 continue
-            url = self.url_template.format(lang=l)
-            if not url.startswith("https://"):
-                raise RuntimeError("Downloads are only allowed via HTTPS")
-            progress(f"Downloading OCR language data {l} …")
-            fd, tmp = tempfile.mkstemp(dir=self.own_dir, suffix=".part")
-            try:
-                req = urllib.request.Request(url, headers={"User-Agent": "AdvancedCtrlF"})
-                with urllib.request.urlopen(req, timeout=60) as r, os.fdopen(fd, "wb") as f:
-                    shutil.copyfileobj(r, f)
-                if os.path.getsize(tmp) < MIN_SIZE:
-                    raise RuntimeError(f"Download of {l}.traineddata is incomplete")
-                os.replace(tmp, target)
-            finally:
-                if os.path.exists(tmp):
-                    os.unlink(tmp)
+            part = self.own_dir / f"{l}.traineddata.part"
+            errors = []
+            for template in urls:
+                url = template.format(lang=l)
+                if not url.startswith("https://"):
+                    errors.append(f"{url}: only HTTPS downloads are allowed")
+                    continue
+                for name, fetch in methods:
+                    progress(f"Downloading OCR language data {l} ({name}, {urllib.parse.urlsplit(url).hostname}) …")
+                    try:
+                        fetch(url, part)
+                        _check_traineddata(part)
+                        _replace(part, target)
+                        log.info("Downloaded %s via %s from %s", target.name, name, url)
+                        break
+                    except Exception as e:
+                        errors.append(f"{name} via {urllib.parse.urlsplit(url).hostname}: {e}")
+                        log.warning("Download of %s via %s from %s failed: %s", target.name, name, url, e)
+                        _remove(part)
+                else:
+                    continue
+                break
+            else:
+                raise RuntimeError(f"{l}.traineddata could not be downloaded.\n" + "\n".join(f"- {e}" for e in errors))
 
     # --- OCR -------------------------------------------------------------
     def textpage(self, page, language: str = "deu+eng", dpi: int | None = None):
