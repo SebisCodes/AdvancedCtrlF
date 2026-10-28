@@ -30,6 +30,7 @@ def _system_tessdata() -> list[Path]:
     cands += [Path(p) for p in (
         "/usr/share/tesseract-ocr/5/tessdata", "/usr/share/tesseract-ocr/4.00/tessdata",
         "/usr/share/tessdata", "/usr/local/share/tessdata",
+        "/opt/homebrew/share/tessdata", "/opt/local/share/tessdata",          # macOS: Homebrew, MacPorts
         r"C:\Program Files\Tesseract-OCR\tessdata", r"C:\Program Files (x86)\Tesseract-OCR\tessdata",
     )]
     if os.environ.get("LOCALAPPDATA"):

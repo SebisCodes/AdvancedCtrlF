@@ -4,7 +4,7 @@
 best matching passages ranked in a table – with page / slide / line / cell, a highlighted preview, and
 "open at hit".
 
-- Works on **Windows and Linux**, fully portable (everything lives in the program folder)
+- Works on **Windows, macOS and Linux**, fully portable (everything lives in the program folder)
 - Ships its own launcher that finds – or automatically downloads – a local Python
 - No admin rights, no installer, no background services, no network access except for the optional downloads
 
@@ -13,6 +13,7 @@ best matching passages ranked in a table – with page / slide / line / cell, a 
 | System  | Run           | Notes                                              |
 |---------|---------------|----------------------------------------------------|
 | Windows | `start.cmd`   | `start.cmd debug` keeps a console open for errors  |
+| macOS   | `start.command` (double-click in Finder) | first time: right-click → *Open* → *Open* (unsigned script) |
 | Linux   | `./start.sh`  | `./start.sh --setup` only prepares Python/packages |
 
 The first start prepares Python and installs the required packages (a few minutes, ~200 MB). Later starts are instant.
@@ -28,12 +29,15 @@ The first start prepares Python and installs the required packages (a few minute
    - **Windows:** the official build of the Python Software Foundation (NuGet package `python`) – SHA512 checked
      against the NuGet catalog and `python.exe` must carry a valid PSF code signature, so Smart App Control and
      Defender do not block it
-   - **Linux:** [python-build-standalone](https://github.com/astral-sh/python-build-standalone), SHA256 checked
-     against the published checksums
+   - **Linux and macOS** (Intel and Apple Silicon): [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+     SHA256 checked against the published checksums
 5. last resort: the system Python, inside a dedicated venv in `python/venv`
 
 If a Python in `python/` cannot be started (for example because Windows blocks it), the Windows launcher sets it
 aside as `python/_blocked` and downloads the signed official build instead.
+
+**macOS:** the current Qt (PySide6) needs **macOS 14 Sonoma or newer**. On older versions set `PY_VERSION=3.12` in
+`start.sh` so that an older PySide6 can be installed.
 
 Set `PY_VERSION=3.13` in the launcher to pin a version. Packages from `requirements.txt` are installed as prebuilt
 wheels only (nothing is compiled) and only re-installed when `requirements.txt` changes.
@@ -109,7 +113,8 @@ PDF and image pages with the hits highlighted.
 ## Folder layout
 
 ```
-start.cmd / start.sh   launchers
+start.cmd / start.sh   launchers (Windows / Linux and macOS)
+start.command          macOS double-click launcher (runs start.sh)
 advanced_ctrl_f.py     entry point
 app/                   application code (extractors, search, UI)
 tools/                 helper scripts used by the launchers
@@ -138,7 +143,11 @@ The JSON files in `data/index/` are plain and documented by example – each pas
 ```
 python/python/bin/python3 -I tests/test_all.py      # Linux
 python\python\python.exe -I tests\test_all.py        # Windows
+python/python/bin/python3 -I tests/smoke_gui.py      # GUI smoke test (works without a screen)
 ```
+
+Every push runs the real launchers and all tests on Linux, macOS and Windows (GitHub Actions,
+`.github/workflows/test.yml`), including the Python download/verification and the OCR data download.
 
 The tests generate small sample files for every format (partly with German text to cover umlauts and language
 detection) and check extraction, locations and ranking.

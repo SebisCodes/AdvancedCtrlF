@@ -154,5 +154,5 @@ goto :eof
 :error
 echo.
 call :log Could not start. See the messages above and data\setup.log.
-pause
+if not defined CI pause
 exit /b 1

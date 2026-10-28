@@ -27,7 +27,7 @@ class Base(unittest.TestCase):
         # Redirect the document store into the temp folder so real data stays untouched
         cls._saved = (cfg.DOCS_DIR, cfg.INDEX_DIR)
         cfg.DOCS_DIR, cfg.INDEX_DIR = cls.tmp / "documents", cls.tmp / "index"
-        cls.ocr = OcrEngine(cls.tmp / "tessdata", 300)
+        cls.ocr = OcrEngine(cfg.TESSDATA_DIR, 300)   # downloaded or system OCR data, read only
         cls.ctx = Context(dict(cfg.DEFAULTS), cls.ocr)
 
     @classmethod

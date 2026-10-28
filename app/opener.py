@@ -18,6 +18,8 @@ from . import config as cfg
 
 log = logging.getLogger(__name__)
 IS_WIN = sys.platform.startswith("win")
+IS_MAC = sys.platform == "darwin"
+MAC_APPS = [Path("/Applications"), Path.home() / "Applications"]
 
 # Only these extensions may be handed to the default application.
 SAFE_OPEN = {
@@ -77,14 +79,26 @@ def _default_open(path: Path) -> bool:
         except OSError as e:
             log.warning("Default application for %s failed: %s", path.name, e)
             return False
-    opener = _which("xdg-open", "gio", "open")
+    opener = "/usr/bin/open" if IS_MAC else _which("xdg-open", "gio", "open")
     if not opener:
         return False
     return _spawn([opener, "open", str(path)] if opener.endswith("gio") else [opener, str(path)])
 
 
+def _mac_app(*names: str) -> str | None:
+    """Executable inside an installed macOS app bundle, e.g. Google Chrome.app/Contents/MacOS/Google Chrome."""
+    for base in MAC_APPS:
+        for name in names:
+            exe = base / f"{name}.app" / "Contents" / "MacOS" / name
+            if exe.is_file():
+                return str(exe)
+    return None
+
+
 def _browsers() -> list[str]:
-    if IS_WIN:
+    if IS_MAC:
+        found = [_mac_app("Google Chrome"), _mac_app("Microsoft Edge"), _mac_app("Firefox"), _mac_app("Brave Browser")]
+    elif IS_WIN:
         found = [_win_paths(r"Microsoft\Edge\Application\msedge.exe"), _win_paths(r"Google\Chrome\Application\chrome.exe"),
                  _win_paths(r"Mozilla Firefox\firefox.exe")]
     else:
@@ -108,7 +122,9 @@ def _pdf_viewers(path: Path, page: int, preferred: str) -> list[list[str]]:
             cmds.append([preferred, "-i", n, p])
         else:
             cmds.append([preferred, p])
-    if IS_WIN:
+    if IS_MAC:
+        pass  # Preview cannot jump to a page from outside - browsers (below) can
+    elif IS_WIN:
         sumatra = _win_paths(r"SumatraPDF\SumatraPDF.exe")
         if sumatra:
             cmds.append([sumatra, "-page", n, p])
@@ -131,13 +147,18 @@ def _pdf_viewers(path: Path, page: int, preferred: str) -> list[list[str]]:
 def _editors(path: Path, line: int) -> list[list[str]]:
     p, n = str(path), str(line)
     cmds = []
-    code = _which("code", "codium") or (IS_WIN and _win_paths(r"Programs\Microsoft VS Code\Code.exe"))
+    code = (_which("code", "codium") or (IS_WIN and _win_paths(r"Programs\Microsoft VS Code\Code.exe"))
+            or (IS_MAC and _mac_bundle_cli("Visual Studio Code", "Contents/Resources/app/bin/code")))
     if code:
         cmds.append([code, "-g", f"{p}:{n}"])
     if IS_WIN:
         npp = _win_paths(r"Notepad++\notepad++.exe")
         if npp:
             cmds.append([npp, f"-n{n}", p])
+    elif IS_MAC:
+        bbedit = _which("bbedit")
+        if bbedit:
+            cmds.append([bbedit, f"+{n}", p])
     else:
         for exe in ("kate", "gnome-text-editor", "gedit", "mousepad", "pluma", "xed", "cosmic-edit"):
             e = _which(exe)
@@ -179,6 +200,14 @@ def open_document(path: Path, target: dict | None, preferred_pdf: str = "", high
     return False, "No suitable application found"
 
 
+def _mac_bundle_cli(app: str, rel: str) -> str | None:
+    for base in MAC_APPS:
+        exe = base / f"{app}.app" / rel
+        if exe.is_file():
+            return str(exe)
+    return None
+
+
 def show_in_folder(path: Path) -> None:
     if IS_WIN:
         # explorer.exe has its own command-line parsing: it needs /select,"C:\path with spaces".
@@ -192,6 +221,9 @@ def show_in_folder(path: Path) -> None:
             log.info("Started %s", cmd)
         except OSError as e:
             log.warning("Could not start %s: %s", cmd, e)
+        return
+    if IS_MAC:  # reveal the file in Finder
+        _spawn(["open", "-R", str(path)] if path.is_file() else ["open", str(path)])
         return
     opener = _which("xdg-open", "gio")
     if opener:

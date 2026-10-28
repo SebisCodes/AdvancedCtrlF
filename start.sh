@@ -1,17 +1,20 @@
 #!/usr/bin/env bash
 # =====================================================================
-#  Advanced Ctrl+F - launcher for Linux
+#  Advanced Ctrl+F - launcher for Linux and macOS
+#  (on macOS double-click start.command, which runs this script)
 #
 #  Python is looked up in this order:
 #    1. PYTHON_BIN (set below or as environment variable)
 #    2. a Python inside the ./python/ subfolder
 #    3. an archive in ./python/ (.tar.gz/.tgz/.tar.xz/.zip/.deb) -> extracted
 #    4. download of the latest stable CPython (python-build-standalone,
-#       SHA256-verified) into ./python/
+#       SHA256-verified) into ./python/ - Linux and macOS, x86_64 and arm64
 #    5. fallback: system python3 (in its own venv under ./python/venv)
 #
 #  Usage:  ./start.sh            start normally
 #          ./start.sh --setup    set up only, do not start
+#
+#  Written for bash 3.2 (macOS default) and BSD tools as well as GNU/Linux.
 # =====================================================================
 set -euo pipefail
 
@@ -25,9 +28,10 @@ mkdir -p "$PY_DIR" "$ROOT/data"
 
 # Everything this launcher prints is also written to data/setup.log (kept below ~1 MB)
 SETUP_LOG="$ROOT/data/setup.log"
-if [ -f "$SETUP_LOG" ] && [ "$(wc -c <"$SETUP_LOG")" -gt 1000000 ]; then mv -f "$SETUP_LOG" "$SETUP_LOG.1"; fi
-exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$SETUP_LOG")) 2>&1   # log without colour codes
-echo "===== $(date '+%Y-%m-%d %H:%M:%S') start.sh $* | $(uname -srm) | $ROOT"
+if [ -f "$SETUP_LOG" ] && [ $(( $(wc -c <"$SETUP_LOG") )) -gt 1000000 ]; then mv -f "$SETUP_LOG" "$SETUP_LOG.1"; fi
+if sed -u '' </dev/null >/dev/null 2>&1; then UNBUF="-u"; else UNBUF="-l"; fi   # GNU sed -u / BSD sed -l
+exec > >(tee >(sed $UNBUF $'s/\033\\[[0-9;]*m//g' >>"$SETUP_LOG")) 2>&1   # log without colour codes
+echo "===== $(date '+%Y-%m-%d %H:%M:%S') start.sh ${*:-} | $(uname -srm) | $ROOT"
 
 say()  { printf '\033[1;34m[Advanced Ctrl+F]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[Advanced Ctrl+F] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -78,6 +82,8 @@ fetch() {  # fetch URL [target file]
     fi
 }
 
+sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
+
 download_python() {
     local arch triple json urls url name sums expected actual tag dl
     case "$(uname -m)" in
@@ -85,7 +91,10 @@ download_python() {
         aarch64|arm64) arch="aarch64" ;;
         *) say "Architecture $(uname -m) is not supported for automatic download."; return 1 ;;
     esac
-    triple="${arch}-unknown-linux-gnu"
+    case "$(uname -s)" in
+        Darwin) triple="${arch}-apple-darwin" ;;
+        *)      triple="${arch}-unknown-linux-gnu" ;;
+    esac
     say "Looking up the latest Python version ..."
     json="$(fetch "$RELEASE_API")" || return 1
     tag="$(printf '%s' "$json" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
@@ -96,7 +105,7 @@ download_python() {
         urls="$(printf '%s\n' "$urls" | grep -E "/cpython-${PY_VERSION//./\\.}(\.|\+|%2B)" || true)"
     fi
     [ -n "$urls" ] || { say "No matching Python found in the release."; return 1; }
-    url="$(printf '%s\n' "$urls" | sed -E 's#.*/cpython-([0-9.]+)(\+|%2B).*#\1 &#' | sort -V | tail -1 | cut -d' ' -f2)"
+    url="$(printf '%s\n' "$urls" | sed -E 's#.*/cpython-([0-9.]+)(\+|%2B).*#\1 &#' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d' ' -f2)"
     name="$(basename "$url")"
     name="${name//%2B/+}"
     say "Downloading $name ..."
@@ -105,7 +114,7 @@ download_python() {
     fetch "$url" "$dl/python.tar.gz" || return 1
     sums="$(fetch "https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/SHA256SUMS")" || return 1
     expected="$(printf '%s\n' "$sums" | grep -F "  $name" | head -1 | cut -d' ' -f1)"
-    actual="$(sha256sum "$dl/python.tar.gz" | cut -d' ' -f1)"
+    actual="$(sha256 "$dl/python.tar.gz")"
     [ -n "$expected" ] || { rm -rf "$dl"; fail "No checksum found for $name - aborting."; }
     [ "$expected" = "$actual" ] || { rm -rf "$dl"; fail "Checksum mismatch - download discarded."; }
     say "Checksum OK, extracting ..."
@@ -137,4 +146,4 @@ if [ -z "$PY" ]; then system_venv && PY="$(find_python || true)" || true; fi
 "$PY" -I "$ROOT/tools/ensure_deps.py" || fail "Setup failed (see above)."
 [ "${1:-}" = "--setup" ] && { say "Setup complete."; exit 0; }
 cd "$ROOT"
-exec "$PY" -I "$ROOT/advanced_ctrl_f.py" "$@"
+exec "$PY" -I "$ROOT/advanced_ctrl_f.py" ${@+"$@"}   # ${@+...}: bash 3.2 + set -u safe

@@ -109,7 +109,8 @@ def _soffice() -> str | None:
         p = shutil.which(name)
         if p:
             return p
-    for p in (r"C:\Program Files\LibreOffice\program\soffice.exe", r"C:\Program Files (x86)\LibreOffice\program\soffice.exe"):
+    for p in (r"C:\Program Files\LibreOffice\program\soffice.exe", r"C:\Program Files (x86)\LibreOffice\program\soffice.exe",
+              "/Applications/LibreOffice.app/Contents/MacOS/soffice"):
         if os.path.isfile(p):
             return p
     return None

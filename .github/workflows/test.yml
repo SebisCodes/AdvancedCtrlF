@@ -1,0 +1,58 @@
+# Runs the real launchers on Linux, macOS and Windows: they download and verify
+# Python, install the packages; then OCR data is downloaded and all tests run.
+name: test
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PY: ${{ runner.os == 'Windows' && 'python\python\python.exe' || 'python/python/bin/python3' }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Launcher setup (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -q && sudo apt-get install -yq libegl1 libgl1 libxkbcommon0 libfontconfig1 libdbus-1-3 >/dev/null
+          ./start.sh --setup
+
+      - name: Launcher setup (macOS, via start.command)
+        if: runner.os == 'macOS'
+        run: ./start.command --setup
+
+      - name: Launcher setup (Windows, via start.cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: start.cmd setup
+
+      - name: Download OCR language data (app code)
+        run: $PY -I -c "import sys; sys.path.insert(0, '.'); from app.ocr import OcrEngine; from app import config as c; OcrEngine(c.TESSDATA_DIR, 300, c.DEFAULTS['tessdata_url']).download(print)"
+
+      - name: Unit tests
+        run: $PY -I -W ignore tests/test_all.py
+
+      - name: GUI smoke test
+        run: $PY -I -W ignore tests/smoke_gui.py
+
+      - name: Report setup.log on failure
+        if: failure()
+        run: |
+          # annotations are visible on the run page without downloading logs
+          if [ -f data/setup.log ]; then
+            msg=$(tail -n 40 data/setup.log | tr -d '\r' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=setup.log (${{ runner.os }})::$msg"
+          fi
