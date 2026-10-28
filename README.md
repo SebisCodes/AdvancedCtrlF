@@ -55,6 +55,13 @@ wheels only (nothing is compiled) and only re-installed when `requirements.txt` 
 Legacy binary formats (`.doc`, `.ppt`) are converted with LibreOffice if it is installed, otherwise their raw text
 is indexed. Unknown files are indexed if they look like text.
 
+**Images inside documents are read with OCR as well** (on by default, menu → *Always OCR all images inside
+documents*): pictures in PDFs, Word, PowerPoint, Excel and OpenDocument files – screenshots, diagrams, scanned
+notes – are extracted and recognised, and the hit points to the page, slide or cell where the picture sits
+(e.g. `Slide 4 · Image (OCR)`, `Sales!D5 · Image (OCR)`). PDF text layers are kept as they are; scanned pages
+are recognised as a whole. Tiny images such as icons are skipped and a picture that appears several times
+(like a logo on every slide) is read and listed only once.
+
 **OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only the language data
 (German + English, ~6 MB) is required. The program asks once before downloading it; an existing Tesseract
 installation is reused automatically.

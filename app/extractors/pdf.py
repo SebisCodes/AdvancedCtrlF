@@ -1,10 +1,11 @@
-"""PDF, XPS and other MuPDF formats plus images - including OCR for scanned pages."""
+"""PDF, XPS and other MuPDF formats plus images - including OCR for scanned pages
+and for every image embedded in a page."""
 from __future__ import annotations
 
 from pathlib import Path
 
 from .. import lang as langmod
-from ..ocr import LanguageTracker
+from ..ocr import ImageOCR, LanguageTracker
 from .base import Chunker, Context, ExtractError, Result
 
 
@@ -47,6 +48,31 @@ def _add_page(ch: Chunker, page, pno: int, textpage=None, loc_kind: str = "page"
     return chars
 
 
+def _ocr_page_images(ch: Chunker, doc, page, pno: int, images: ImageOCR) -> None:
+    """OCR every image placed on a page that otherwise has a normal text layer
+    (screenshots, diagrams, photographed notes ...)."""
+    if not images.enabled:
+        return
+    pymupdf = _pymupdf()
+    try:
+        infos = page.get_image_info(xrefs=True)
+    except Exception:
+        return
+    for info in infos:
+        xref = info.get("xref") or 0
+        bbox = pymupdf.Rect(info["bbox"]) & page.rect
+        if bbox.is_empty or bbox.width < 20 or bbox.height < 10:
+            continue
+        if xref:   # stored image: read in full resolution, once per document
+            key, source = ("xref", xref), (lambda x=xref: pymupdf.Pixmap(doc, x))
+        else:      # inline image: render its area of the page
+            key = ("inline", pno, tuple(round(v) for v in bbox))
+            source = (lambda b=bbox: page.get_pixmap(clip=b, dpi=300))
+        text = images.read(key, source)
+        if text:
+            ch.add(text, {"kind": "page", "page": pno, "part": "Image (OCR)"})
+
+
 def extract_pdf(path: Path, ctx: Context) -> Result:
     pymupdf = _pymupdf()
     try:
@@ -60,6 +86,7 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
     tracker = LanguageTracker()
     ocr_ok = bool(cfg.get("ocr_enabled")) and ctx.ocr is not None and ctx.ocr.available()
     ocr_pages, skipped_ocr, sample = 0, 0, []
+    images = ImageOCR(ctx)
     n = doc.page_count
     with doc:
         for i, page in enumerate(doc):
@@ -69,7 +96,7 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
             text = page.get_text("text")
             scanned = len(text.strip()) < cfg.get("ocr_min_chars", 25) and bool(page.get_images(full=False))
             tp = None
-            if (scanned or cfg.get("ocr_force")) and doc.is_pdf:
+            if scanned and doc.is_pdf:
                 if ocr_ok:
                     ctx.progress(f"OCR page {i + 1}/{n}")
                     try:
@@ -80,9 +107,11 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
                 elif scanned:
                     skipped_ocr += 1
             _add_page(ch, page, i + 1, tp)
+            if tp is None:
+                _ocr_page_images(ch, doc, page, i + 1, images)
             if len(sample) < 30:
                 sample.append(page.get_text("text", textpage=tp)[:2000] if tp else text[:2000])
-    meta = {"pages": n, "ocr_pages": ocr_pages}
+    meta = {"pages": n, "ocr_pages": ocr_pages, "ocr_images": images.count}
     if skipped_ocr:
         meta["warning"] = f"{skipped_ocr} scanned page(s) without OCR (language data missing or OCR disabled)"
     meta["language"] = langmod.detect("\n".join(sample))[0]

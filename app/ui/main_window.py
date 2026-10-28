@@ -190,9 +190,9 @@ class MainWindow(QMainWindow):
         self.act_ocr = QAction("OCR for scanned PDFs and images", menu, checkable=True,
                                checked=bool(self.config.get("ocr_enabled")))
         self.act_ocr.toggled.connect(lambda v: self._set_cfg("ocr_enabled", v))
-        self.act_force = QAction("Always force OCR (slow)", menu, checkable=True,
-                                 checked=bool(self.config.get("ocr_force")))
-        self.act_force.toggled.connect(lambda v: self._set_cfg("ocr_force", v))
+        self.act_force = QAction("Always OCR all images inside documents (slower)", menu, checkable=True,
+                                 checked=bool(self.config.get("ocr_all_images")))
+        self.act_force.toggled.connect(lambda v: self._set_cfg("ocr_all_images", v))
         menu.addAction(self.act_ocr)
         menu.addAction(self.act_force)
         menu.addAction("Download OCR language data (German/English)", self.download_ocr)
@@ -420,7 +420,9 @@ class MainWindow(QMainWindow):
             it.setIcon(0, dot_icon(c["ok"] if status == "ok" else c["warn"] if status == "warn" else c["err"]))
             tip = [d.get("display_name", ""), f"Type: {kind}", f"Language: {d.get('language', '?')}"]
             if d.get("ocr_pages"):
-                tip.append(f"OCR: {d['ocr_pages']} page(s)")
+                tip.append(f"OCR: {d['ocr_pages']} scanned page(s)")
+            if d.get("ocr_images"):
+                tip.append(f"OCR: {d['ocr_images']} image(s)")
             if d.get("message"):
                 tip.append(d["message"])
             it.setToolTip(0, "\n".join(tip))

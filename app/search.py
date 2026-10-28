@@ -448,7 +448,7 @@ def format_location(t: dict) -> str:
     elif kind == "slide":
         s = f"Slide {t.get('slide')}"
     elif kind == "cell":
-        s = f"{t.get('sheet')}!{t.get('cell', '')}" if t.get("cell") else f"{t.get('sheet')}, row {t.get('row')}"
+        s = f"{t.get('sheet')}!{t.get('cell', '')}" if t.get("cell") else (f"{t.get('sheet')}, row {t.get('row')}" if t.get("row") else f"{t.get('sheet')}")
     elif kind == "row":
         s = f"Line {t.get('line')}" + (f", column {t['cell']}" if t.get("cell") else "")
     elif kind == "line":

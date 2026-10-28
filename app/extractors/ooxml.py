@@ -11,6 +11,7 @@ import zipfile
 from pathlib import Path
 
 from .. import lang as langmod
+from ..ocr import ImageOCR
 from .base import Chunker, Context, ExtractError, Result, safe_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -19,6 +20,9 @@ P = "http://schemas.openxmlformats.org/presentationml/2006/main"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PKG_REL = "http://schemas.openxmlformats.org/package/2006/relationships"
+SSML = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+XDR = "http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing"
+VML = "urn:schemas-microsoft-com:vml"
 
 MAX_PART = 100 * 1024 * 1024
 
@@ -59,6 +63,24 @@ def _open_zip(path: Path) -> zipfile.ZipFile:
         raise ExtractError("Not a valid Office file (possibly a legacy binary format or encrypted)") from e
 
 
+def _image_rids(el) -> list[str]:
+    """Relationship ids of all images embedded below `el` (DrawingML and legacy VML)."""
+    rids = [b.get(q(R, "embed")) for b in el.iter(q(A, "blip"))]
+    rids += [v.get(q(R, "id")) for v in el.iter(f"{{{VML}}}imagedata")]
+    return [r for r in rids if r]
+
+
+def _ocr_media(ch: Chunker, z: zipfile.ZipFile, rels: dict, rids: list[str], loc: dict, images: ImageOCR) -> None:
+    """OCR the images behind `rids` and add their text at `loc`."""
+    for rid in rids:
+        target = rels.get(rid)
+        if not target or target not in z.NameToInfo:
+            continue  # external/linked image
+        text = images.read(target, lambda t=target: _read(z, t))
+        if text:
+            ch.add(text, dict(loc, part="Image (OCR)"))
+
+
 # ----------------------------------------------------------------------- DOCX
 CAPTION_STYLES = re.compile(r"caption|beschriftung|legende", re.I)
 
@@ -68,6 +90,7 @@ class _DocxWalker:
         self.page = 1
         self.para = 0
         self.rendered = use_rendered_breaks
+        self.images: list[tuple[list[str], dict]] = []   # (relationship ids, location)
 
     def para_text(self, p) -> tuple[str, list[str]]:
         """Text of a paragraph plus image alt texts found in it. Counts page breaks."""
@@ -119,6 +142,9 @@ def _docx_block(ch: Chunker, el, walker: _DocxWalker, part: str | None) -> None:
             ch.add(text, start_loc, key=("docx", part, start_loc["page"]))
         for alt in alts:
             ch.add(alt, dict(start_loc, part="Image (alt text)"))
+        rids = _image_rids(el)
+        if rids:
+            walker.images.append((rids, start_loc))
     elif el.tag == q(W, "tbl"):
         for row in el.iter(q(W, "tr")):
             cells = []
@@ -130,6 +156,9 @@ def _docx_block(ch: Chunker, el, walker: _DocxWalker, part: str | None) -> None:
                     cell_txt.append(t)
                 cells.append(" ".join(cell_txt).strip())
             ch.add(" | ".join(c for c in cells if c), row_loc, key=("tbl", part, row_loc["page"]))
+            rids = _image_rids(row)
+            if rids:
+                walker.images.append((rids, row_loc))
     elif el.tag == q(W, "sdt"):
         content = el.find(q(W, "sdtContent"))
         if content is not None:
@@ -149,6 +178,13 @@ def extract_docx(path: Path, ctx: Context) -> Result:
         walker = _DocxWalker(rendered)
         _docx_body(ch, safe_xml(data), walker, None)
         pages = walker.page
+        images = ImageOCR(ctx)
+        if images.enabled and walker.images:
+            main_rels = _rels(z, main)
+            for rids, loc in walker.images:
+                if ctx.cancelled():
+                    raise ExtractError("Cancelled")
+                _ocr_media(ch, z, main_rels, rids, {k: v for k, v in loc.items() if k != "part"}, images)
         extra = [("header", "Header"), ("footer", "Footer"), ("footnotes", "Footnote"),
                  ("endnotes", "Endnote"), ("comments", "Comment")]
         for name in sorted(z.namelist()):
@@ -161,7 +197,7 @@ def extract_docx(path: Path, ctx: Context) -> Result:
                             t, alts = w2.para_text(el)
                             ch.add(t, {"kind": "part", "part": label}, key=("x", label))
     chunks = ch.result()
-    return Result(chunks, {"pages": pages, "pages_approx": True,
+    return Result(chunks, {"pages": pages, "pages_approx": True, "ocr_images": images.count,
                            "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
@@ -233,6 +269,7 @@ def _is_caption(text_box, pic_box) -> bool:
 
 def extract_pptx(path: Path, ctx: Context) -> Result:
     ch = Chunker()
+    images = ImageOCR(ctx)
     with _open_zip(path) as z:
         rels = _rels(z, "_rels/.rels")
         pres = next((p for p in rels.values() if p.endswith("presentation.xml")), "ppt/presentation.xml")
@@ -270,8 +307,11 @@ def extract_pptx(path: Path, ctx: Context) -> Result:
             for i, (t, _) in enumerate(texts):
                 if i not in caption_ids:
                     ch.add(t, base, key=("slide", idx))
+            slide_rels = _rels(z, part)
+            if images.enabled:  # pictures, picture fills and slide backgrounds
+                _ocr_media(ch, z, slide_rels, _image_rids(sroot), base, images)
             # speaker notes
-            for target in _rels(z, part).values():
+            for target in slide_rels.values():
                 if "notesSlide" in target:
                     nd = _read(z, target)
                     if nd:
@@ -281,7 +321,8 @@ def extract_pptx(path: Path, ctx: Context) -> Result:
                             _walk_shapes(ntree, nt, [], [])
                         ch.add("\n".join(t for t, _ in nt), dict(base, part="Notes"))
     chunks = ch.result()
-    return Result(chunks, {"pages": n, "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
+    return Result(chunks, {"pages": n, "ocr_images": images.count,
+                           "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
 # ----------------------------------------------------------------------- XLSX
@@ -315,6 +356,32 @@ def add_row(ch: Chunker, sheet: str, rownum: int, values: list) -> None:
 MAX_ROWS = 300_000
 
 
+def _xlsx_images(path: Path, ch: Chunker, ctx: Context, images: ImageOCR) -> None:
+    """OCR pictures placed on worksheets, located at the cell they are anchored to."""
+    with _open_zip(path) as z:
+        wb = next((p for p in _rels(z, "_rels/.rels").values() if p.endswith("workbook.xml")), "xl/workbook.xml")
+        wb_rels = _rels(z, wb)
+        for sheet in safe_xml(_read(z, wb) or b"<x/>").iter(q(SSML, "sheet")):
+            name, part = sheet.get("name", ""), wb_rels.get(sheet.get(q(R, "id")))
+            if not part:
+                continue
+            for drawing in _rels(z, part).values():
+                if "/drawings/" not in drawing or not drawing.endswith(".xml"):
+                    continue
+                drawing_rels = _rels(z, drawing)
+                for anchor in safe_xml(_read(z, drawing) or b"<x/>"):
+                    if ctx.cancelled():
+                        raise ExtractError("Cancelled")
+                    loc = {"kind": "cell", "sheet": name}
+                    frm = anchor.find(q(XDR, "from"))
+                    try:
+                        col, row = int(frm.findtext(q(XDR, "col"))), int(frm.findtext(q(XDR, "row"))) + 1
+                        loc.update(row=row, cells=[[0, f"{col_letter(col)}{row}"]])
+                    except (AttributeError, TypeError, ValueError):
+                        pass  # absolute anchor: sheet only
+                    _ocr_media(ch, z, drawing_rels, _image_rids(anchor), loc, images)
+
+
 def extract_xlsx(path: Path, ctx: Context) -> Result:
     try:
         import openpyxl
@@ -335,7 +402,15 @@ def extract_xlsx(path: Path, ctx: Context) -> Result:
         sheets = len(wb.worksheets)
     finally:
         wb.close()
-    return Result(ch.result(), {"pages": sheets})
+    images = ImageOCR(ctx)
+    if images.enabled:
+        try:
+            _xlsx_images(path, ch, ctx, images)
+        except ExtractError:
+            raise
+        except Exception:
+            pass  # pictures are a bonus - never fail the whole workbook because of them
+    return Result(ch.result(), {"pages": sheets, "ocr_images": images.count})
 
 
 def extract_xls(path: Path, ctx: Context) -> Result:

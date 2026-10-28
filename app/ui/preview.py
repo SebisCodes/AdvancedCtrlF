@@ -121,16 +121,19 @@ class Preview(QWidget):
                 avail = max(400, self.page_scroll.viewport().width() - 24)
                 zoom = min(2.5, avail / max(1.0, page.rect.width)) * ratio
                 pix = page.get_pixmap(matrix=pymupdf.Matrix(zoom, zoom), alpha=False)
-                tp = None
-                if not page.get_text("text").strip() and self.ocr is not None and self.ocr.available():
-                    try:  # scanned page: mark hits via an OCR text layer
-                        tp = self.ocr.textpage(page)
-                    except Exception:
-                        tp = None
-                rects = []
-                for w in list(words)[:40]:
-                    try:
-                        rects += page.search_for(w, quads=False, textpage=tp)[:50]
+                def find(textpage=None):
+                    found = []
+                    for w in list(words)[:40]:
+                        try:
+                            found += page.search_for(w, quads=False, textpage=textpage)[:50]
+                        except Exception:
+                            pass
+                    return found
+
+                rects = find()
+                if not rects and self.ocr is not None and self.ocr.available():
+                    try:  # scanned page or hit inside an image: search an OCR text layer
+                        rects = find(self.ocr.textpage(page))
                     except Exception:
                         pass
                 img = QImage(pix.samples, pix.width, pix.height, pix.stride, QImage.Format_RGB888).copy()

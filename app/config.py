@@ -24,7 +24,7 @@ LOG_FILE = DATA_DIR / "advanced_ctrl_f.log"
 
 DEFAULTS: dict = {
     "ocr_enabled": True,          # read scanned pages / images via OCR
-    "ocr_force": False,           # OCR even pages that have a text layer
+    "ocr_all_images": True,       # also OCR every image inside PDFs and Office files (slower)
     "ocr_dpi": 300,
     "ocr_min_chars": 25,          # less text on a page -> OCR
     "ocr_download_declined": False,

@@ -181,7 +181,7 @@ class Store:
 
     def _extract_into(self, doc: dict, path: Path, ctx: Context) -> None:
         ctx.progress(f"Reading {doc['name']} …")
-        doc.update(kind="", status="ok", message="", chunks=[], pages=None, language="und", ocr_pages=0)
+        doc.update(kind="", status="ok", message="", chunks=[], pages=None, language="und", ocr_pages=0, ocr_images=0)
         try:
             kind = sniff(path)
             doc["kind"] = kind.lstrip(".")
@@ -191,6 +191,7 @@ class Store:
             doc["pages_approx"] = res.meta.get("pages_approx", False)
             doc["language"] = res.meta.get("language", "und")
             doc["ocr_pages"] = res.meta.get("ocr_pages", 0)
+            doc["ocr_images"] = res.meta.get("ocr_images", 0)
             if res.meta.get("warning"):
                 doc["status"], doc["message"] = "warn", res.meta["warning"]
             elif not res.chunks:

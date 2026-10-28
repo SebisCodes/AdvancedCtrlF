@@ -117,6 +117,44 @@ class ExtractTests(Base):
             extract(self.tmp / "in" / "bomb.xml", self.ctx)
 
 
+class ImageOcrTests(Base):
+    """Every picture inside a document is OCR'd and attributed to its location."""
+
+    def ocr_hits(self, name, needle):
+        if not self.ocr.available():
+            self.skipTest("no OCR language data available")
+        res, _ = self.texts(name)
+        return res, [c["loc"] for c in res.chunks if needle in c["text"]]
+
+    def test_pdf_image_on_text_page(self):
+        res, locs = self.ocr_hits("scan.pdf", "Warehouse inventory")
+        self.assertEqual([(l["page"], l["part"]) for l in locs], [(2, "Image (OCR)")])
+        self.assertIn("warranty period", "\n".join(c["text"] for c in res.chunks))  # text layer kept
+
+    def test_docx_image(self):
+        res, locs = self.ocr_hits("vertrag.docx", "Server room")
+        self.assertEqual([(l["page"], l["part"]) for l in locs], [(2, "Image (OCR)")])
+        self.assertEqual(res.meta["ocr_images"], 1)
+
+    def test_pptx_image_deduplicated(self):
+        res, locs = self.ocr_hits("bericht.pptx", "Revenue chart")
+        self.assertEqual([(l["slide"], l["part"]) for l in locs], [(1, "Image (OCR)")])  # same picture on 2 slides
+
+    def test_xlsx_image_anchor_cell(self):
+        res, locs = self.ocr_hits("kunden.xlsx", "Signature field")
+        self.assertEqual(len(locs), 1)
+        self.assertEqual(format_location(target_of(locs[0], "", 0)), "Tabelle!D5 · Image (OCR)")
+
+    def test_odt_image(self):
+        _, locs = self.ocr_hits("protokoll.odt", "Whiteboard")
+        self.assertEqual([(l["para"], l["part"]) for l in locs], [(4, "Image (OCR)")])
+
+    def test_disabled(self):
+        ctx = Context(dict(cfg.DEFAULTS, ocr_all_images=False), self.ocr)
+        res = extract(self.tmp / "in" / "bericht.pptx", ctx)
+        self.assertFalse(any("Revenue" in c["text"] for c in res.chunks))
+
+
 class StoreAndSearchTests(Base):
     def test_store_archive_and_search(self):
         from app.store import Store
@@ -144,7 +182,8 @@ class StoreAndSearchTests(Base):
 
         self.assertIn(top("Kündigungsfrist")[0], ("vertrag.docx", "scan.pdf"))
         self.assertEqual(top('"drei Monate"'), ("scan.pdf", "p. 1, l. 1"))
-        self.assertEqual(top("Umsatzentwicklung"), ("bericht.pptx", "Slide 2 · Image (alt text)"))
+        self.assertEqual(top("Umsatzentwicklung"), ("bericht.pptx", "Slide 1 · Image (alt text)"))
+        self.assertEqual(top("Revenue chart")[1], "Slide 1 · Image (OCR)")               # text inside a picture
         self.assertEqual(top("Gruppenbild"), ("protokoll.odt", "Paragraph 3 · Image (alt text)"))
         self.assertEqual(top("Archivinhalt")[0], "innen.txt")
         self.assertEqual(top("Baeckerei")[1], "Tabelle!A2")                 # umlaut folding

@@ -104,3 +104,77 @@ class LanguageTracker:
         if self.tries >= 3:
             self.code = "deu+eng"
         return None
+
+
+class ImageOCR:
+    """OCR for images embedded in documents (PDF, Office, OpenDocument).
+
+    One instance per document: each distinct image is read only once (a logo on
+    every slide would otherwise produce dozens of identical hits), tiny images
+    such as icons are skipped, and the document language is learned on the way.
+    """
+    MIN_SIDE = 24          # px - smaller images cannot contain readable text
+    MIN_AREA = 12_000      # px² - skips icons and bullets
+    TARGET_WIDTH = 1600    # small screenshots are upscaled for better recognition
+    MAX_PIXELS = 25_000_000
+    MAX_IMAGES = 2000      # safety limit per document
+
+    def __init__(self, ctx) -> None:
+        cfg = ctx.config
+        self.ctx = ctx
+        self.enabled = bool(cfg.get("ocr_enabled") and cfg.get("ocr_all_images")
+                            and ctx.ocr is not None and ctx.ocr.available())
+        self.tracker = LanguageTracker()
+        self.seen: set = set()
+        self.count = 0
+
+    def _prepare(self, pix):
+        import pymupdf
+        if pix.width < self.MIN_SIDE or pix.height < self.MIN_SIDE or pix.width * pix.height < self.MIN_AREA:
+            return None
+        if pix.colorspace is None or pix.colorspace.n not in (1, 3):
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)       # CMYK, indexed ... -> RGB
+        if pix.alpha:
+            pix = pymupdf.Pixmap(pix, 0)                    # drop transparency
+        scale = 1.0
+        if pix.width < self.TARGET_WIDTH:
+            scale = min(3.0, self.TARGET_WIDTH / pix.width)
+        if pix.width * pix.height * scale * scale > self.MAX_PIXELS:
+            scale = (self.MAX_PIXELS / (pix.width * pix.height)) ** 0.5
+        if abs(scale - 1.0) > 0.05:
+            pix = pymupdf.Pixmap(pix, int(pix.width * scale), int(pix.height * scale), None)
+        return pix
+
+    def _ocr(self, pix, language: str) -> str:
+        import pymupdf
+        td = self.ctx.ocr.tessdata()
+        with pymupdf.open("pdf", pix.pdfocr_tobytes(language=language, tessdata=str(td))) as doc:
+            return doc[0].get_text("text")
+
+    def read(self, key, source) -> str:
+        """OCR text of an image. `source` is image bytes or a pymupdf.Pixmap (or a
+        callable returning one). Returns "" for duplicates, tiny or unsupported images."""
+        if not self.enabled or key in self.seen or self.count >= self.MAX_IMAGES or self.ctx.cancelled():
+            return ""
+        self.seen.add(key)
+        try:
+            import pymupdf
+            if callable(source):
+                source = source()
+            pix = pymupdf.Pixmap(source) if isinstance(source, (bytes, bytearray)) else source
+            pix = self._prepare(pix)
+        except Exception:
+            return ""  # unsupported format (e.g. EMF/WMF/SVG) or broken image
+        if pix is None:
+            return ""
+        self.count += 1
+        self.ctx.progress(f"OCR image {self.count}")
+        try:
+            text = self._ocr(pix, self.tracker.current())
+            better = self.tracker.learn(text)
+            if better and better != "deu+eng":
+                text = self._ocr(pix, better)
+        except Exception:
+            return ""
+        text = text.strip()
+        return text if sum(c.isalnum() for c in text) >= 3 else ""
