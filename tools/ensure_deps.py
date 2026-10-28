@@ -10,7 +10,6 @@ Exit code 0 = everything is in place.
 """
 import hashlib
 import json
-import os
 import subprocess
 import sys
 import tempfile
@@ -65,9 +64,13 @@ def install_pip_from_pypi() -> bool:
         if hashlib.sha256(path.read_bytes()).hexdigest() != wheel["digests"]["sha256"]:
             print("ERROR: pip download checksum mismatch.")
             return False
-        # pip can run directly from its own wheel to install itself
-        return run(os.path.join(str(path), "pip"), "install", "--no-index", "--no-warn-script-location",
-                   "--disable-pip-version-check", str(path)) == 0
+        # Run pip straight from its wheel to install itself. Started via -c (not as ".../pip"),
+        # because on Windows pip refuses to modify itself when sys.argv[0] is named "pip".
+        boot = ("import sys; sys.path.insert(0, sys.argv[1]); "
+                "from pip._internal.cli.main import main; "
+                "sys.exit(main(['install', '--no-index', '--no-warn-script-location', "
+                "'--disable-pip-version-check', sys.argv[1]]))")
+        return run("-c", boot, str(path)) == 0
 
 
 def ensure_pip() -> bool:
