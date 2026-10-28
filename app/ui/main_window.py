@@ -3,15 +3,16 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import QByteArray, QSize, Qt, QTimer
-from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
+from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
+from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
                                QPushButton, QSplitter, QStackedWidget, QTableView, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
+from .. import __version__
 from .. import config as cfg
-from .. import opener
+from .. import diagnostics, opener
 from ..ocr import OcrEngine
 from ..search import SearchIndex
 from ..store import Store
@@ -98,6 +99,8 @@ class MainWindow(QMainWindow):
         self.jobs.doc_ready.connect(self._on_doc_ready)
         self.jobs.message.connect(lambda m: self.statusBar().showMessage(m, 8000))
         self.jobs.idle.connect(self._on_idle)
+        self.jobs.ocr_installed.connect(self._on_ocr_installed)
+        self.jobs.ocr_failed.connect(self._on_ocr_failed)
         self.jobs.start()
 
         self.search_timer = QTimer(self, singleShot=True, interval=220)
@@ -206,7 +209,11 @@ class MainWindow(QMainWindow):
         menu.addAction("Choose preferred PDF viewer …", self.choose_pdf_viewer)
         menu.addAction("Open data folder", lambda: opener.show_in_folder(cfg.INDEX_DIR))
         menu.addSeparator()
+        menu.addAction("Open log file", self.open_log)
+        menu.addAction("Copy diagnostics (for support)", self.copy_diagnostics)
+        menu.addSeparator()
         menu.addAction("Search help", lambda: QMessageBox.information(self, "Help", HELP))
+        menu.addAction(f"About Advanced Ctrl+F {__version__}", self.show_about)
         btn.setMenu(menu)
         return btn
 
@@ -577,6 +584,24 @@ class MainWindow(QMainWindow):
         if self.search.text().strip():
             self.run_search()
         QTimer.singleShot(300, self._maybe_ask_ocr_on_first_start)  # after the window is visible
+        if self.ocr.available():  # e.g. language data copied by hand or Tesseract installed meanwhile
+            self._on_ocr_installed()
+
+    def _on_ocr_installed(self):
+        """Language data arrived: re-read everything that could not be OCR'd before."""
+        pending = [d for d in self.index.docs.values() if d.get("needs_ocr")]
+        if pending:
+            self.statusBar().showMessage(f"OCR ready - re-reading {len(pending)} document(s) that need it", 8000)
+            self.reindex(pending)
+
+    def _on_ocr_failed(self, reason: str):
+        QMessageBox.warning(
+            self, "OCR download failed",
+            f"The OCR language data could not be downloaded:\n{reason}\n\n"
+            "Common causes: no internet access, or a company proxy/firewall blocking github.com.\n\n"
+            "Alternative: get the files eng.traineddata and deu.traineddata (e.g. from\n"
+            "github.com/tesseract-ocr/tessdata_fast) and copy them into this folder:\n"
+            f"{cfg.TESSDATA_DIR}\n\nThen choose ⚙ Menu → Re-read documents with warnings.")
 
     def _on_doc_ready(self, doc):
         if doc.get("duplicate"):
@@ -615,6 +640,25 @@ class MainWindow(QMainWindow):
     def _set_cfg(self, key, value):
         self.config[key] = value
         self.config.save()
+
+    def open_log(self):
+        if not cfg.LOG_FILE.exists():
+            self.statusBar().showMessage("No log file yet", 5000)
+            return
+        if not QDesktopServices.openUrl(QUrl.fromLocalFile(str(cfg.LOG_FILE))):
+            opener.show_in_folder(cfg.LOG_FILE)
+
+    def copy_diagnostics(self):
+        text = diagnostics.report(self.config, self.ocr, self.index.docs)
+        QApplication.clipboard().setText(text)
+        QMessageBox.information(
+            self, "Diagnostics copied",
+            "Diagnostic information was copied to the clipboard:\nversions, OCR status, documents that could not "
+            "be read and the last lines of the logs.\n\nPaste it into an e-mail or chat to the person who helps you.\n"
+            "It contains file names and folder paths, but no document contents.")
+
+    def show_about(self):
+        QMessageBox.information(self, "About", "\n".join(diagnostics.environment()))
 
     def choose_pdf_viewer(self):
         f, _ = QFileDialog.getOpenFileName(self, "Choose PDF viewer (e.g. SumatraPDF, Acrobat, Okular)")

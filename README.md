@@ -91,6 +91,21 @@ PDF and image pages with the hits highlighted.
 > **Tip (Windows):** keep the program folder outside of OneDrive/Dropbox. Python and its packages are several
 > thousand files – syncing them is slow and triggers OneDrive's "delete these items?" prompts.
 
+## Troubleshooting
+
+- **⚙ Menu → Copy diagnostics** copies versions, OCR status, documents that could not be read and the last log
+  lines to the clipboard – paste it into a message to whoever helps you (contains file names and paths, no
+  document contents).
+- `data/advanced_ctrl_f.log` – application log: every document read (with OCR counts and problems), opened
+  applications, errors with tracebacks. *Menu → Open log file* opens it.
+- `data/setup.log` – launcher log: which Python was found or downloaded, checksum/signature checks, package
+  installation (pip output) and the exact error if the start fails.
+- `start.cmd debug` keeps the console window open on Windows.
+- **Yellow dot "…not read: OCR language data missing"** – the OCR data was not downloaded (declined or blocked by a
+  proxy/firewall). Use *Menu → Download OCR language data*; affected documents are re-read automatically afterwards.
+  Without internet access, copy `eng.traineddata` and `deu.traineddata` (from
+  [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)) into `data/tessdata/` and restart.
+
 ## Folder layout
 
 ```

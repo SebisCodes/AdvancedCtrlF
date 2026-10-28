@@ -113,7 +113,7 @@ class Store:
             try:
                 d = json.loads(f.read_text(encoding="utf-8"))
             except (OSError, ValueError) as e:
-                log.warning("Index %s defekt: %s", f, e)
+                log.warning("Index %s is broken: %s", f, e)
                 continue
             if isinstance(d, dict) and "id" in d:
                 docs.append(d)
@@ -192,8 +192,12 @@ class Store:
             doc["language"] = res.meta.get("language", "und")
             doc["ocr_pages"] = res.meta.get("ocr_pages", 0)
             doc["ocr_images"] = res.meta.get("ocr_images", 0)
+            doc["needs_ocr"] = bool(res.meta.get("ocr_skipped"))
             if res.meta.get("warning"):
                 doc["status"], doc["message"] = "warn", res.meta["warning"]
+            elif doc["needs_ocr"]:
+                doc["status"], doc["message"] = "warn", (f"{res.meta['ocr_skipped']} image(s) not read: "
+                                                         "OCR language data missing - ⚙ Menu → Download OCR language data")
             elif not res.chunks:
                 doc["status"], doc["message"] = "warn", "No text found"
         except ExtractError as e:
@@ -202,8 +206,13 @@ class Store:
             log.exception("Error in %s", path)
             doc["status"], doc["message"] = "error", f"{type(e).__name__}: {e}"
         doc["indexed"] = datetime.now().isoformat(timespec="seconds")
+        level = {"ok": logging.INFO, "warn": logging.WARNING}.get(doc["status"], logging.ERROR)
+        log.log(level, "Read %s [%s]: %s chunks, %s OCR page(s), %s OCR image(s)%s", doc.get("display_name") or doc["name"],
+                doc["kind"] or "?", len(doc["chunks"]), doc.get("ocr_pages", 0), doc.get("ocr_images", 0),
+                f" - {doc['message']}" if doc["message"] else "")
 
     def _error_doc(self, src: Path, prefix: str, msg: str) -> dict:
+        log.error("Skipped %s: %s", prefix + src.name, msg)
         return {"id": None, "name": src.name, "display_name": prefix + src.name, "status": "error", "message": msg}
 
     def _save(self, doc: dict) -> None:

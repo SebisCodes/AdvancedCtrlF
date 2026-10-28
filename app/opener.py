@@ -6,6 +6,7 @@ execute code when opened are never launched.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import subprocess
@@ -15,6 +16,7 @@ from urllib.parse import quote
 
 from . import config as cfg
 
+log = logging.getLogger(__name__)
 IS_WIN = sys.platform.startswith("win")
 
 # Only these extensions may be handed to the default application.
@@ -59,8 +61,10 @@ def _spawn(args: list[str]) -> bool:
         else:
             kw["start_new_session"] = True
         subprocess.Popen(args, **kw)
+        log.info("Started %s", args)
         return True
-    except OSError:
+    except OSError as e:
+        log.warning("Could not start %s: %s", args, e)
         return False
 
 
@@ -68,8 +72,10 @@ def _default_open(path: Path) -> bool:
     if IS_WIN:
         try:
             os.startfile(str(path))  # noqa: S606 - only allow-listed document types get here
+            log.info("Opened %s with its default application", path.name)
             return True
-        except OSError:
+        except OSError as e:
+            log.warning("Default application for %s failed: %s", path.name, e)
             return False
     opener = _which("xdg-open", "gio", "open")
     if not opener:
@@ -175,7 +181,17 @@ def open_document(path: Path, target: dict | None, preferred_pdf: str = "", high
 
 def show_in_folder(path: Path) -> None:
     if IS_WIN:
-        _spawn(["explorer", f"/select,{path}"])
+        # explorer.exe has its own command-line parsing: it needs /select,"C:\path with spaces".
+        # An argument list would be quoted as a whole ("/select,C:\...") - explorer does not
+        # understand that and opens the default "Documents" folder instead (e.g. with OneDrive paths).
+        # Windows paths cannot contain quotes, so this string is safe.
+        target = str(path.resolve())
+        cmd = f'explorer /select,"{target}"' if path.is_file() else f'explorer "{target}"'
+        try:
+            subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200)
+            log.info("Started %s", cmd)
+        except OSError as e:
+            log.warning("Could not start %s: %s", cmd, e)
         return
     opener = _which("xdg-open", "gio")
     if opener:

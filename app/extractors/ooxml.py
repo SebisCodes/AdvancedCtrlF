@@ -179,7 +179,7 @@ def extract_docx(path: Path, ctx: Context) -> Result:
         _docx_body(ch, safe_xml(data), walker, None)
         pages = walker.page
         images = ImageOCR(ctx)
-        if images.enabled and walker.images:
+        if images.wanted and walker.images:
             main_rels = _rels(z, main)
             for rids, loc in walker.images:
                 if ctx.cancelled():
@@ -198,6 +198,7 @@ def extract_docx(path: Path, ctx: Context) -> Result:
                             ch.add(t, {"kind": "part", "part": label}, key=("x", label))
     chunks = ch.result()
     return Result(chunks, {"pages": pages, "pages_approx": True, "ocr_images": images.count,
+                           "ocr_skipped": images.skipped,
                            "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
@@ -308,7 +309,7 @@ def extract_pptx(path: Path, ctx: Context) -> Result:
                 if i not in caption_ids:
                     ch.add(t, base, key=("slide", idx))
             slide_rels = _rels(z, part)
-            if images.enabled:  # pictures, picture fills and slide backgrounds
+            if images.wanted:  # pictures, picture fills and slide backgrounds
                 _ocr_media(ch, z, slide_rels, _image_rids(sroot), base, images)
             # speaker notes
             for target in slide_rels.values():
@@ -321,7 +322,7 @@ def extract_pptx(path: Path, ctx: Context) -> Result:
                             _walk_shapes(ntree, nt, [], [])
                         ch.add("\n".join(t for t, _ in nt), dict(base, part="Notes"))
     chunks = ch.result()
-    return Result(chunks, {"pages": n, "ocr_images": images.count,
+    return Result(chunks, {"pages": n, "ocr_images": images.count, "ocr_skipped": images.skipped,
                            "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
@@ -403,14 +404,14 @@ def extract_xlsx(path: Path, ctx: Context) -> Result:
     finally:
         wb.close()
     images = ImageOCR(ctx)
-    if images.enabled:
+    if images.wanted:
         try:
             _xlsx_images(path, ch, ctx, images)
         except ExtractError:
             raise
         except Exception:
             pass  # pictures are a bonus - never fail the whole workbook because of them
-    return Result(ch.result(), {"pages": sheets, "ocr_images": images.count})
+    return Result(ch.result(), {"pages": sheets, "ocr_images": images.count, "ocr_skipped": images.skipped})
 
 
 def extract_xls(path: Path, ctx: Context) -> Result:

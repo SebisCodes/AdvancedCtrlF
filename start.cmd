@@ -26,26 +26,36 @@ rem ---------------------------------------------------------------------
 set "ROOT=%~dp0"
 if "%ROOT:~-1%"=="\" set "ROOT=%ROOT:~0,-1%"
 set "PY_DIR=%ROOT%\python"
+
+rem Launcher messages, the Python download and the package installation are also
+rem written to data\setup.log (kept below ~1 MB) - useful when something goes wrong
+if not exist "%ROOT%\data" mkdir "%ROOT%\data"
+set "SETUP_LOG=%ROOT%\data\setup.log"
+if exist "%SETUP_LOG%" for %%F in ("%SETUP_LOG%") do if %%~zF GTR 1000000 move /y "%SETUP_LOG%" "%SETUP_LOG%.1" >nul
+chcp 65001 >nul
+>>"%SETUP_LOG%" echo ===== %DATE% %TIME% start.cmd %* ^| %PROCESSOR_ARCHITECTURE% ^| %ROOT%
+>>"%SETUP_LOG%" ver
 if not exist "%PY_DIR%" mkdir "%PY_DIR%"
 set "PY="
 
 if defined PYTHON_BIN (
     if exist "%PYTHON_BIN%" ( set "PY=%PYTHON_BIN%" ) else (
-        echo [Advanced Ctrl+F] PYTHON_BIN points to a file that does not exist: %PYTHON_BIN%
+        call :log PYTHON_BIN points to a file that does not exist: %PYTHON_BIN%
         goto :error
     )
 )
 call :locate_python
 if defined PY call :check_python
 if not defined PY (
-    echo [Advanced Ctrl+F] No Python found. Put a Python or an archive into "%PY_DIR%"
-    echo                   or set PYTHON_BIN at the top of this file.
+    call :log No Python found. Put a Python or an archive into "%PY_DIR%"
+    call :log or set PYTHON_BIN at the top of this file.
     goto :error
 )
 
-"%PY%" -I "%ROOT%\tools\ensure_deps.py"
+call :log Using Python: "%PY%"
+"%PY%" -I "%ROOT%\tools\ensure_deps.py" --log "%SETUP_LOG%"
 if errorlevel 1 goto :error
-if /i "%~1"=="setup" ( echo [Advanced Ctrl+F] Setup complete. & goto :eof )
+if /i "%~1"=="setup" ( call :log Setup complete. & goto :eof )
 
 cd /d "%ROOT%"
 if /i "%~1"=="debug" (
@@ -75,12 +85,12 @@ goto :eof
 rem Make sure the interpreter can actually run (Windows may block unsigned programs)
 "%PY%" -I -c "import sys" >nul 2>&1
 if not errorlevel 1 goto :eof
-echo [Advanced Ctrl+F] "%PY%" cannot be started - probably blocked by Windows security.
+call :log "%PY%" cannot be started - probably blocked by Windows security.
 if /i not "%PY%"=="%PY_DIR%\python\python.exe" (
     set "PY="
     goto :eof
 )
-echo [Advanced Ctrl+F] Replacing it with the official, signed Python ...
+call :log Replacing it with the official, signed Python ...
 if exist "%PY_DIR%\_blocked" rd /s /q "%PY_DIR%\_blocked"
 move "%PY_DIR%\python" "%PY_DIR%\_blocked" >nul
 set "PY="
@@ -104,7 +114,7 @@ goto :eof
 :extract_archives
 for %%A in ("%PY_DIR%\*.zip" "%PY_DIR%\*.tar.gz" "%PY_DIR%\*.tgz" "%PY_DIR%\*.tar.xz") do (
     if exist "%%~fA" (
-        echo [Advanced Ctrl+F] Extracting %%~nxA ...
+        call :log Extracting %%~nxA ...
         tar.exe -xf "%%~fA" -C "%PY_DIR%" || powershell -NoProfile -Command "Expand-Archive -LiteralPath '%%~fA' -DestinationPath '%PY_DIR%' -Force"
         if not exist "%PY_DIR%\_archive" mkdir "%PY_DIR%\_archive"
         move /y "%%~fA" "%PY_DIR%\_archive\" >nul
@@ -112,7 +122,7 @@ for %%A in ("%PY_DIR%\*.zip" "%PY_DIR%\*.tar.gz" "%PY_DIR%\*.tgz" "%PY_DIR%\*.ta
 )
 for %%A in ("%PY_DIR%\python-*.exe") do (
     if exist "%%~fA" if /i not "%%~nxA"=="python.exe" (
-        echo [Advanced Ctrl+F] Installing %%~nxA into "%PY_DIR%\installed" ...
+        call :log Installing %%~nxA into "%PY_DIR%\installed" ...
         "%%~fA" /quiet InstallAllUsers=0 TargetDir="%PY_DIR%\installed" Include_launcher=0 Include_test=0 PrependPath=0 Shortcuts=0 AssociateFiles=0
         if not exist "%PY_DIR%\_archive" mkdir "%PY_DIR%\_archive"
         move /y "%%~fA" "%PY_DIR%\_archive\" >nul
@@ -121,9 +131,9 @@ for %%A in ("%PY_DIR%\python-*.exe") do (
 goto :eof
 
 :download_python
-echo [Advanced Ctrl+F] No local Python found - downloading the latest one ...
-powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\get_python.ps1" -Dest "%PY_DIR%" -Version "%PY_VERSION%"
-if errorlevel 1 echo [Advanced Ctrl+F] Download failed.
+call :log No local Python found - downloading the latest one ...
+powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%\tools\get_python.ps1" -Dest "%PY_DIR%" -Version "%PY_VERSION%" -Log "%SETUP_LOG%"
+if errorlevel 1 call :log Download failed.
 goto :eof
 
 :system_venv
@@ -131,12 +141,18 @@ set "SYSPY="
 where py >nul 2>&1 && set "SYSPY=py -3"
 if not defined SYSPY ( where python >nul 2>&1 && set "SYSPY=python" )
 if not defined SYSPY goto :eof
-echo [Advanced Ctrl+F] Using system Python in a dedicated venv ...
+call :log Using system Python in a dedicated venv ...
 %SYSPY% -m venv "%PY_DIR%\venv"
+goto :eof
+
+:log
+rem echo a message and append it to data\setup.log
+echo [Advanced Ctrl+F] %*
+>>"%SETUP_LOG%" echo [Advanced Ctrl+F] %*
 goto :eof
 
 :error
 echo.
-echo [Advanced Ctrl+F] Could not start. See the messages above.
+call :log Could not start. See the messages above and data\setup.log.
 pause
 exit /b 1

@@ -5,6 +5,7 @@ If missing, it can be downloaded to data/tessdata/ after asking the user.
 """
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import tempfile
@@ -12,6 +13,8 @@ import urllib.request
 from pathlib import Path
 
 from . import lang as langmod
+
+log = logging.getLogger(__name__)
 
 LANGS = ("eng", "deu")
 MIN_SIZE = 500_000  # smaller files are certainly not a valid language model
@@ -143,11 +146,12 @@ class ImageOCR:
     def __init__(self, ctx) -> None:
         cfg = ctx.config
         self.ctx = ctx
-        self.enabled = bool(cfg.get("ocr_enabled") and cfg.get("ocr_all_images")
-                            and ctx.ocr is not None and ctx.ocr.available())
+        self.wanted = bool(cfg.get("ocr_enabled") and cfg.get("ocr_all_images"))
+        self.enabled = self.wanted and ctx.ocr is not None and ctx.ocr.available()
         self.tracker = LanguageTracker()
         self.seen: set = set()
         self.count = 0
+        self.skipped = 0   # images that would need OCR but the language data is missing
 
     def _prepare(self, pix):
         import pymupdf
@@ -176,7 +180,7 @@ class ImageOCR:
     def read(self, key, source) -> str:
         """OCR text of an image. `source` is image bytes or a pymupdf.Pixmap (or a
         callable returning one). Returns "" for duplicates, tiny or unsupported images."""
-        if not self.enabled or key in self.seen or self.count >= self.MAX_IMAGES or self.ctx.cancelled():
+        if not self.wanted or key in self.seen or self.count >= self.MAX_IMAGES or self.ctx.cancelled():
             return ""
         self.seen.add(key)
         try:
@@ -185,9 +189,13 @@ class ImageOCR:
                 source = source()
             pix = pymupdf.Pixmap(source) if isinstance(source, (bytes, bytearray)) else source
             pix = self._prepare(pix)
-        except Exception:
+        except Exception as e:
+            log.debug("Image %s skipped: %s", key, e)
             return ""  # unsupported format (e.g. EMF/WMF/SVG) or broken image
         if pix is None:
+            return ""
+        if not self.enabled:   # language data missing: remember that this document needs OCR later
+            self.skipped += 1
             return ""
         self.count += 1
         self.ctx.progress(f"OCR image {self.count}")
@@ -197,6 +205,7 @@ class ImageOCR:
             if better and better != "deu+eng":
                 text = self._ocr(pix, better)
         except Exception:
+            log.warning("OCR of image %s failed", key, exc_info=True)
             return ""
         text = text.strip()
         return text if sum(c.isalnum() for c in text) >= 3 else ""

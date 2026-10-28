@@ -10,11 +10,12 @@ from . import config as cfg
 
 def main() -> int:
     cfg.ensure_dirs()
-    logging.basicConfig(filename=cfg.LOG_FILE, level=logging.INFO, encoding="utf-8",
-                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    from .diagnostics import setup_logging
+    setup_logging()
     try:
         from PySide6.QtWidgets import QApplication, QMessageBox
     except ImportError:
+        logging.exception("PySide6 cannot be imported")
         print("PySide6 is missing - please start via start.cmd / start.sh (installs everything automatically).")
         return 1
 

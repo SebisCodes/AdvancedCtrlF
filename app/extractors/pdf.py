@@ -52,7 +52,7 @@ def _add_page(ch: Chunker, page, pno: int, textpage=None, loc_kind: str = "page"
 def _ocr_page_images(ch: Chunker, doc, page, pno: int, images: ImageOCR) -> None:
     """OCR every image placed on a page that otherwise has a normal text layer
     (screenshots, diagrams, photographed notes ...)."""
-    if not images.enabled:
+    if not images.wanted:
         return
     pymupdf = _pymupdf()
     try:
@@ -112,17 +112,21 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
                 _ocr_page_images(ch, doc, page, i + 1, images)
             if len(sample) < 30:
                 sample.append(page.get_text("text", textpage=tp)[:2000] if tp else text[:2000])
-    meta = {"pages": n, "ocr_pages": ocr_pages, "ocr_images": images.count}
+    meta = {"pages": n, "ocr_pages": ocr_pages, "ocr_images": images.count,
+            "ocr_skipped": images.skipped + (skipped_ocr if cfg.get("ocr_enabled") else 0)}
     if skipped_ocr:
-        meta["warning"] = f"{skipped_ocr} scanned page(s) without OCR (language data missing or OCR disabled)"
+        meta["warning"] = (f"{skipped_ocr} scanned page(s) not read: " +
+                           ("OCR language data missing - ⚙ Menu → Download OCR language data" if cfg.get("ocr_enabled") else "OCR is switched off in the menu"))
     meta["language"] = langmod.detect("\n".join(sample))[0]
     return Result(ch.result(), meta)
 
 
 def extract_image(path: Path, ctx: Context) -> Result:
     pymupdf = _pymupdf()
-    if not (ctx.config.get("ocr_enabled") and ctx.ocr is not None and ctx.ocr.available()):
-        return Result([], {"warning": "Image without OCR - language data missing or OCR disabled"})
+    if not ctx.config.get("ocr_enabled"):
+        return Result([], {"warning": "Image not read: OCR is switched off in the menu"})
+    if ctx.ocr is None or not ctx.ocr.available():
+        return Result([], {"warning": "Image not read: OCR language data missing - ⚙ Menu → Download OCR language data", "ocr_skipped": 1})
     ch = Chunker()
     tracker = LanguageTracker()
     texts = []

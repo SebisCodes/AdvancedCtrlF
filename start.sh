@@ -21,7 +21,13 @@ PY_VERSION="${PY_VERSION:-}"     # e.g. PY_VERSION=3.13  (empty = latest stable)
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_DIR="$ROOT/python"
 RELEASE_API="https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest"
-mkdir -p "$PY_DIR"
+mkdir -p "$PY_DIR" "$ROOT/data"
+
+# Everything this launcher prints is also written to data/setup.log (kept below ~1 MB)
+SETUP_LOG="$ROOT/data/setup.log"
+if [ -f "$SETUP_LOG" ] && [ "$(wc -c <"$SETUP_LOG")" -gt 1000000 ]; then mv -f "$SETUP_LOG" "$SETUP_LOG.1"; fi
+exec > >(tee >(sed -u 's/\x1b\[[0-9;]*m//g' >>"$SETUP_LOG")) 2>&1   # log without colour codes
+echo "===== $(date '+%Y-%m-%d %H:%M:%S') start.sh $* | $(uname -srm) | $ROOT"
 
 say()  { printf '\033[1;34m[Advanced Ctrl+F]\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31m[Advanced Ctrl+F] ERROR:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -124,6 +130,7 @@ fi
 if [ -z "$PY" ] && extract_archives; then PY="$(find_python || true)"; fi
 if [ -z "$PY" ]; then download_python && PY="$(find_python || true)" || true; fi
 if [ -z "$PY" ]; then system_venv && PY="$(find_python || true)" || true; fi
+[ -n "$PY" ] && say "Using Python: $PY ($("$PY" -I -c 'import sys; print(sys.version.split()[0])' 2>&1))"
 [ -n "$PY" ] || fail "No Python found. Put a Python (or an archive) into $PY_DIR or set PYTHON_BIN."
 
 # ---------------------------------------------------------------- packages + start

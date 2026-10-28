@@ -70,11 +70,11 @@ def _image_refs(el) -> list[str]:
     return refs
 
 
-def _ocr_pictures(path: Path, ch: Chunker, items: list[tuple[str, dict]], ctx: Context) -> int:
-    """OCR the collected (picture path, location) pairs; returns the number of images read."""
+def _ocr_pictures(path: Path, ch: Chunker, items: list[tuple[str, dict]], ctx: Context) -> dict:
+    """OCR the collected (picture path, location) pairs; returns meta counters."""
     images = ImageOCR(ctx)
-    if not images.enabled or not items:
-        return 0
+    if not images.wanted or not items:
+        return {}
     with zipfile.ZipFile(path) as z:
         names = set(z.namelist())
         for href, loc in items:
@@ -85,7 +85,7 @@ def _ocr_pictures(path: Path, ch: Chunker, items: list[tuple[str, dict]], ctx: C
             text = images.read(href, lambda h=href: z.read(h))
             if text:
                 ch.add(text, dict(loc, part="Image (OCR)"))
-    return images.count
+    return {"ocr_images": images.count, "ocr_skipped": images.skipped}
 
 
 def _content(path: Path) -> object:
@@ -140,9 +140,9 @@ def extract_odt(path: Path, ctx: Context) -> Result:
 
     if body is not None:
         walk(body)
-    count = _ocr_pictures(path, ch, pictures, ctx)
+    counts = _ocr_pictures(path, ch, pictures, ctx)
     chunks = ch.result()
-    return Result(chunks, {"ocr_images": count,
+    return Result(chunks, {**counts,
                            "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
@@ -167,9 +167,9 @@ def extract_odp(path: Path, ctx: Context) -> Result:
                 ch.add(t, dict(base, part=label))
         if notes is not None:
             ch.add("\n".join(_inline_text(p) for p in notes.iter() if p.tag in TEXT_BLOCKS), dict(base, part="Notes"))
-    count = _ocr_pictures(path, ch, pictures, ctx)
+    counts = _ocr_pictures(path, ch, pictures, ctx)
     chunks = ch.result()
-    return Result(chunks, {"pages": len(pages), "ocr_images": count, "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
+    return Result(chunks, {"pages": len(pages), **counts, "language": langmod.detect(" ".join(c["text"] for c in chunks[:200]))[0]})
 
 
 def extract_ods(path: Path, ctx: Context) -> Result:
@@ -200,5 +200,5 @@ def extract_ods(path: Path, ctx: Context) -> Result:
         shapes = tbl.find(q("table", "shapes"))  # pictures floating over the sheet
         if shapes is not None:
             pictures.extend((h, {"kind": "cell", "sheet": name}) for h in _image_refs(shapes))
-    count = _ocr_pictures(path, ch, pictures, ctx)
-    return Result(ch.result(), {"pages": len(tables), "ocr_images": count})
+    counts = _ocr_pictures(path, ch, pictures, ctx)
+    return Result(ch.result(), {"pages": len(tables), **counts})

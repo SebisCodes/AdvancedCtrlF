@@ -36,6 +36,8 @@ class JobThread(QThread):
     progress = Signal(str, int, int)       # text, done, total
     doc_ready = Signal(object)             # new/updated document
     message = Signal(str)                  # message for the status bar
+    ocr_installed = Signal()               # OCR language data was downloaded successfully
+    ocr_failed = Signal(str)               # OCR language data download failed (reason)
     idle = Signal(str, int)                     # queue empty: summary text, number of failures
 
     def __init__(self, store: Store, config: dict, ocr) -> None:
@@ -86,6 +88,7 @@ class JobThread(QThread):
                     if kind == "ocr_download":
                         self.ocr.download(lambda m: self.progress.emit(m, done, self.pending))
                         self.message.emit("OCR language data installed")
+                        self.ocr_installed.emit()
                     elif kind == "add":
                         for doc in self.store.add_path(Path(item), ctx):
                             if doc.get("duplicate"):
@@ -100,6 +103,8 @@ class JobThread(QThread):
                         stats["added"] += 1
                 except Exception as e:
                     log.exception("Job %s failed", kind)
+                    if kind == "ocr_download":
+                        self.ocr_failed.emit(str(e))
                     stats["failed"] += 1
                     self.message.emit(f"Error with {label}: {e}")
                 done += 1
