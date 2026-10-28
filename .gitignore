@@ -1,0 +1,6 @@
+/python/*
+!/python/.gitkeep
+/data/
+/config/config.json
+__pycache__/
+*.pyc
