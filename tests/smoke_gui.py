@@ -31,6 +31,9 @@ QMessageBox.information = staticmethod(lambda *a, **k: QMessageBox.Ok)
 QMessageBox.warning = staticmethod(lambda *a, **k: QMessageBox.Ok)
 
 from app.ui.main_window import MainWindow  # noqa: E402
+from app.ui.ocr_languages import LanguagePacksDialog  # noqa: E402
+
+LanguagePacksDialog.exec = lambda self: LanguagePacksDialog.Rejected   # never block on the pack dialog
 
 samples.make_all(tmp / "in")
 app = QApplication([])

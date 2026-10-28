@@ -17,8 +17,27 @@ from . import net
 
 log = logging.getLogger(__name__)
 
-LANGS = ("eng", "deu")
-MIN_SIZE = 500_000  # smaller files are certainly not a valid language model
+FIRST_PASS_MAX = 4          # languages combined in the first OCR pass (more = slower)
+NOT_LANGUAGES = {"osd", "equ"}   # helper models in tessdata folders, not languages
+
+
+def _min_size(code: str) -> int:
+    """A downloaded pack must have at least half of its known size (else: broken/HTML page)."""
+    lang = langmod.BY_TESS.get(code)
+    return int(lang.size_mb * 1e6 * 0.5) if lang else 100_000
+
+
+def _packs_in(folder: Path) -> list[str]:
+    try:
+        return sorted(p.name[:-len(".traineddata")] for p in folder.glob("*.traineddata")
+                      if p.name[:-len(".traineddata")] not in NOT_LANGUAGES and p.stat().st_size > 1000)
+    except OSError:
+        return []
+
+
+def _catalog_order(codes) -> list[str]:
+    order = {l.tess: i for i, l in enumerate(langmod.LANGUAGES)}
+    return sorted(codes, key=lambda c: (order.get(c, 999), c))
 
 
 def _system_tessdata() -> list[Path]:
@@ -47,11 +66,11 @@ def _fetch_powershell(url: str, dest: Path) -> None:
     net.fetch_powershell(url, dest)
 
 
-def _check_traineddata(path: Path) -> None:
+def _check_traineddata(path: Path, min_size: int = 100_000) -> None:
     size = path.stat().st_size
     with open(path, "rb") as f:
         head = f.read(64).lstrip()
-    if size < MIN_SIZE or head[:1] == b"<":   # an HTML error/login page instead of the model
+    if size < min_size or head[:1] == b"<":   # an HTML error/login page instead of the model
         raise RuntimeError(f"received an invalid file ({size} bytes) - possibly a proxy or login page")
 
 
@@ -75,39 +94,74 @@ def _remove(path: Path) -> None:
 
 
 class OcrEngine:
+    """OCR language packs (data/tessdata) and OCR calls. Packs from an existing Tesseract
+    installation are used as long as none are installed here; installing copies them."""
+
     def __init__(self, own_dir: Path, dpi: int = 300, url_template: str = "") -> None:
         self.own_dir = own_dir
         self.dpi = dpi
         self.url_template = url_template
 
-    # --- Language data -----------------------------------------------------
+    # --- Language packs ---------------------------------------------------
     def tessdata(self) -> Path | None:
         for d in [self.own_dir, *_system_tessdata()]:
-            if all((d / f"{l}.traineddata").is_file() for l in LANGS):
+            if _packs_in(d):
                 return d
         return None
+
+    def installed(self) -> list[str]:
+        """Language packs OCR can use right now (Tesseract codes, catalog order)."""
+        td = self.tessdata()
+        return _catalog_order(_packs_in(td)) if td else []
+
+    def own_packs(self) -> list[str]:
+        return _catalog_order(_packs_in(self.own_dir))
+
+    def system_packs(self) -> dict[str, Path]:
+        found: dict[str, Path] = {}
+        for d in _system_tessdata():
+            for code in _packs_in(d):
+                found.setdefault(code, d / f"{code}.traineddata")
+        return found
 
     def available(self) -> bool:
         try:
             import pymupdf  # noqa: F401
         except ImportError:
             return False
-        return self.tessdata() is not None
+        return bool(self.installed())
 
-    def download(self, progress=lambda msg: None) -> None:
-        """Download eng/deu.traineddata. Tries every source with every method until one works:
-        Python (urllib), then - on Windows - PowerShell, which uses the Windows network stack incl.
-        company proxies that need Windows authentication; then a CDN mirror if github.com is blocked."""
+    def first_pass(self) -> str:
+        """Language string for the first OCR pass: up to FIRST_PASS_MAX installed packs."""
+        return "+".join(self.installed()[:FIRST_PASS_MAX]) or "eng"
+
+    def remove(self, codes) -> None:
+        for code in codes:
+            _remove(self.own_dir / f"{code}.traineddata")
+            log.info("Removed OCR language pack %s", code)
+
+    def download(self, codes=langmod.DEFAULT_PACKS, progress=lambda msg: None) -> None:
+        """Install language packs. A pack found in a local Tesseract installation is copied;
+        otherwise it is downloaded - trying Python (urllib), then on Windows PowerShell (Windows
+        network stack incl. company proxies with Windows authentication), then a CDN mirror if
+        github.com is blocked."""
         self.own_dir.mkdir(parents=True, exist_ok=True)
         for stale in self.own_dir.glob("*.part"):   # leftovers of interrupted downloads
             _remove(stale)
         urls = [u for u in dict.fromkeys([self.url_template, MIRROR]) if u]
         methods = [("Python", _fetch_python)] + ([("PowerShell", _fetch_powershell)] if os.name == "nt" else [])
-        for l in LANGS:
+        system = self.system_packs()
+        for n, l in enumerate(codes, 1):
             target = self.own_dir / f"{l}.traineddata"
-            if target.is_file() and target.stat().st_size >= MIN_SIZE:
+            if target.is_file() and target.stat().st_size >= _min_size(l):
                 continue
             part = self.own_dir / f"{l}.traineddata.part"
+            if l in system:
+                progress(f"Copying OCR language pack {langmod.name_of(l)} ({n}/{len(codes)}) …")
+                shutil.copyfile(system[l], part)
+                _replace(part, target)
+                log.info("Copied %s from %s", target.name, system[l])
+                continue
             errors = []
             for template in urls:
                 url = template.format(lang=l)
@@ -115,10 +169,11 @@ class OcrEngine:
                     errors.append(f"{url}: only HTTPS downloads are allowed")
                     continue
                 for name, fetch in methods:
-                    progress(f"Downloading OCR language data {l} ({name}, {urllib.parse.urlsplit(url).hostname}) …")
+                    progress(f"Downloading OCR language pack {langmod.name_of(l)} ({n}/{len(codes)}, "
+                             f"{name}, {urllib.parse.urlsplit(url).hostname}) …")
                     try:
                         fetch(url, part)
-                        _check_traineddata(part)
+                        _check_traineddata(part, _min_size(l))
                         _replace(part, target)
                         log.info("Downloaded %s via %s from %s", target.name, name, url)
                         break
@@ -130,14 +185,16 @@ class OcrEngine:
                     continue
                 break
             else:
-                raise RuntimeError(f"{l}.traineddata could not be downloaded.\n" + "\n".join(f"- {e}" for e in errors))
+                raise RuntimeError(f"{langmod.name_of(l)} ({l}.traineddata) could not be downloaded.\n"
+                                   + "\n".join(f"- {e}" for e in errors))
 
     # --- OCR -------------------------------------------------------------
-    def textpage(self, page, language: str = "deu+eng", dpi: int | None = None):
+    def textpage(self, page, language: str | None = None, dpi: int | None = None):
         td = self.tessdata()
         if td is None:
             raise RuntimeError("OCR language data is missing")
-        return page.get_textpage_ocr(language=language, dpi=dpi or self.dpi, full=True, tessdata=str(td))
+        return page.get_textpage_ocr(language=language or self.first_pass(), dpi=dpi or self.dpi, full=True,
+                                     tessdata=str(td))
 
 
 def native_dpi(page, fallback: int = 300) -> int:
@@ -161,27 +218,31 @@ def native_dpi(page, fallback: int = 300) -> int:
 
 
 class LanguageTracker:
-    """Remembers the detected document language: the first OCR pages run with
-    deu+eng, afterwards the detected single language is used (more accurate)."""
+    """Learns the document language: the first OCR pages run with up to FIRST_PASS_MAX
+    installed packs combined; once the language is detected (and its pack is installed)
+    only that pack is used - more accurate and faster."""
 
-    def __init__(self) -> None:
-        self.code: str | None = None   # Tesseract code once confident
+    def __init__(self, ocr) -> None:
+        self.first = ocr.first_pass() if ocr is not None else "eng"
+        self.installed = set(ocr.installed()) if ocr is not None else set()
+        self.code: str | None = None
         self.tries = 0
 
     def current(self) -> str:
-        return self.code or "deu+eng"
+        return self.code or self.first
 
     def learn(self, text: str) -> str | None:
-        """Return a new language code if the page should be recognized again."""
+        """Return the pack to re-recognise the page with, if the language is now known."""
         if self.code is not None:
             return None
         lang, conf = langmod.detect(text)
         self.tries += 1
-        if lang != "und" and conf >= 0.8:
-            self.code = langmod.tesseract_code(lang)
-            return self.code
+        tess = langmod.tesseract_code(lang)
+        if tess in self.installed and conf >= 0.6:
+            self.code = tess
+            return tess if tess != self.first else None
         if self.tries >= 3:
-            self.code = "deu+eng"
+            self.code = self.first
         return None
 
 
@@ -204,7 +265,7 @@ class ImageOCR:
         self.ctx = ctx
         self.wanted = bool(cfg.get("ocr_enabled") and cfg.get("ocr_all_images"))
         self.enabled = self.wanted and ctx.ocr is not None and ctx.ocr.available()
-        self.tracker = LanguageTracker()
+        self.tracker = LanguageTracker(ctx.ocr)
         self.seen: set = set()
         self.count = 0
         self.skipped = 0   # images that would need OCR but the language data is missing
@@ -258,7 +319,7 @@ class ImageOCR:
         try:
             text = self._ocr(pix, self.tracker.current())
             better = self.tracker.learn(text)
-            if better and better != "deu+eng":
+            if better:
                 text = self._ocr(pix, better)
         except Exception:
             log.warning("OCR of image %s failed", key, exc_info=True)

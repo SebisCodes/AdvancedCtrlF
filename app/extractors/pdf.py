@@ -23,7 +23,7 @@ def _ocr_page(page, ctx: Context, tracker: LanguageTracker):
     tp = ctx.ocr.textpage(page, tracker.current(), dpi)
     text = page.get_text("text", textpage=tp)
     better = tracker.learn(text)
-    if better and better != "deu+eng":
+    if better:
         tp = ctx.ocr.textpage(page, better, dpi)
     return tp
 
@@ -84,7 +84,7 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
         raise ExtractError("Document is password protected")
     cfg = ctx.config
     ch = Chunker()
-    tracker = LanguageTracker()
+    tracker = LanguageTracker(ctx.ocr)
     ocr_ok = bool(cfg.get("ocr_enabled")) and ctx.ocr is not None and ctx.ocr.available()
     ocr_pages, skipped_ocr, sample = 0, 0, []
     images = ImageOCR(ctx)
@@ -116,7 +116,7 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
             "ocr_skipped": images.skipped + (skipped_ocr if cfg.get("ocr_enabled") else 0)}
     if skipped_ocr:
         meta["warning"] = (f"{skipped_ocr} scanned page(s) not read: " +
-                           ("OCR language data missing - ⚙ Menu → Download OCR language data" if cfg.get("ocr_enabled") else "OCR is switched off in the menu"))
+                           ("OCR language data missing - ⚙ Menu → OCR language packs" if cfg.get("ocr_enabled") else "OCR is switched off in the menu"))
     meta["language"] = langmod.detect("\n".join(sample))[0]
     return Result(ch.result(), meta)
 
@@ -126,9 +126,9 @@ def extract_image(path: Path, ctx: Context) -> Result:
     if not ctx.config.get("ocr_enabled"):
         return Result([], {"warning": "Image not read: OCR is switched off in the menu"})
     if ctx.ocr is None or not ctx.ocr.available():
-        return Result([], {"warning": "Image not read: OCR language data missing - ⚙ Menu → Download OCR language data", "ocr_skipped": 1})
+        return Result([], {"warning": "Image not read: OCR language data missing - ⚙ Menu → OCR language packs", "ocr_skipped": 1})
     ch = Chunker()
-    tracker = LanguageTracker()
+    tracker = LanguageTracker(ctx.ocr)
     texts = []
     with pymupdf.open(str(path)) as img:
         n = img.page_count

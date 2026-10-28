@@ -267,6 +267,70 @@ class AnyFileAndRepositoryTests(Base):
             parse("http://example.org/a.pdf")
 
 
+class LanguageTests(Base):
+    SAMPLES = {
+        "en": "The contract can be terminated by either party with three months notice and the deposit is returned.",
+        "de": "Der Vertrag kann von beiden Seiten mit einer Frist von drei Monaten gekündigt werden.",
+        "fr": "Le contrat peut être résilié par chacune des parties avec un préavis de trois mois.",
+        "es": "El contrato puede ser rescindido por cualquiera de las partes con un preaviso de tres meses.",
+        "it": "Il contratto può essere disdetto da ciascuna delle parti con un preavviso di tre mesi e il deposito.",
+        "nl": "Het contract kan door beide partijen worden opgezegd met een opzegtermijn van drie maanden.",
+        "pl": "Umowa może zostać rozwiązana przez każdą ze stron i to nie jest problem dla nas oraz jego firmy.",
+        "ru": "Договор может быть расторгнут любой из сторон с уведомлением за три месяца.",
+        "uk": "Договір може бути розірваний будь-якою зі сторін із повідомленням за три місяці.",
+        "el": "Η σύμβαση μπορεί να καταγγελθεί από οποιοδήποτε μέρος.",
+        "ar": "يمكن لأي من الطرفين إنهاء العقد بإشعار مدته ثلاثة أشهر.",
+        "ja": "契約はいずれの当事者も三か月前の通知により解約することができます。",
+        "ko": "계약은 어느 당사자든 3개월 전에 통지하여 해지할 수 있습니다.",
+        "zh": "任何一方均可提前三个月通知终止合同，这个问题我们会说明。",
+    }
+
+    def test_detection(self):
+        from app.lang import detect
+        for iso, text in self.SAMPLES.items():
+            with self.subTest(iso=iso):
+                self.assertEqual(detect(text)[0], iso)
+
+    def test_pack_install_copy_and_remove(self):
+        import app.ocr as ocrmod
+        from app.ocr import LanguageTracker, OcrEngine
+        system = self.tmp / "system_tessdata"
+        system.mkdir(exist_ok=True)
+        for code in ("eng", "fra"):
+            (system / f"{code}.traineddata").write_bytes(b"\x01" * 3_000_000)
+        own = self.tmp / "own_tessdata"
+        saved = ocrmod._system_tessdata, ocrmod.MIRROR
+        ocrmod._system_tessdata, ocrmod.MIRROR = (lambda: [system]), "https://mirror.invalid/{lang}"
+        try:
+            eng = OcrEngine(own, 300, "https://invalid.invalid/{lang}")
+            self.assertEqual(eng.installed(), ["eng", "fra"])            # system packs used while none here
+            eng.download(["eng", "fra"])                                  # copied, no network needed
+            self.assertEqual(eng.own_packs(), ["eng", "fra"])
+            self.assertEqual(eng.first_pass(), "eng+fra")
+            tracker = LanguageTracker(eng)
+            self.assertEqual(tracker.learn(self.SAMPLES["fr"] * 3), "fra")  # re-read with the detected pack
+            eng.remove(["fra"])
+            self.assertEqual(eng.installed(), ["eng"])
+            with self.assertRaises(RuntimeError):                         # not local, download fails
+                eng.download(["ita"])
+            self.assertEqual(list(own.glob("*.part")), [])
+        finally:
+            ocrmod._system_tessdata, ocrmod.MIRROR = saved
+
+    def test_french_scan_uses_french_pack(self):
+        import pymupdf
+        if "fra" not in self.ocr.installed():
+            self.skipTest("French OCR pack not installed")
+        doc = pymupdf.open()
+        page = doc.new_page(width=700, height=160)
+        page.insert_text((20, 80), "Le dépôt sera remboursé après la résiliation du contrat.", fontsize=13)
+        f = self.tmp / "francais.png"
+        f.write_bytes(page.get_pixmap(dpi=200).tobytes("png"))
+        res = extract(f, self.ctx)
+        self.assertEqual(res.meta["language"], "fr")
+        self.assertIn("dépôt sera remboursé", " ".join(c["text"] for c in res.chunks))
+
+
 class StoreAndSearchTests(Base):
     def test_store_archive_and_search(self):
         from app.store import Store

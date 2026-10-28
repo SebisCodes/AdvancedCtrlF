@@ -17,6 +17,7 @@ from ..ocr import OcrEngine
 from ..search import SearchIndex
 from ..store import Store
 from . import theme
+from .ocr_languages import LanguagePacksDialog
 from .preview import Preview
 from .results import BarDelegate, HtmlDelegate, ResultsModel
 from .workers import JobThread, LoadThread
@@ -203,7 +204,7 @@ class MainWindow(QMainWindow):
         self.act_force.toggled.connect(lambda v: self._set_cfg("ocr_all_images", v))
         menu.addAction(self.act_ocr)
         menu.addAction(self.act_force)
-        menu.addAction("Download OCR language data (German/English)", self.download_ocr)
+        menu.addAction("OCR language packs …", self.manage_ocr_packs)
         menu.addSeparator()
         menu.addAction("Add files …", self.add_files_dialog)
         menu.addAction("Add folder …", self.add_folder_dialog)
@@ -385,27 +386,30 @@ class MainWindow(QMainWindow):
         self.jobs.submit("add", paths)
         self._busy(True)
 
-    def _ask_ocr_download(self) -> None:
-        """Ask whether to download the OCR language data; remembers a "no"."""
+    def manage_ocr_packs(self, first_start: bool = False) -> None:
+        """Choose, install and remove OCR language packs."""
         self._set_cfg("ocr_first_start_asked", True)
-        r = QMessageBox.question(
-            self, "Text recognition (OCR)",
-            "Advanced Ctrl+F can read text in scanned PDFs, image files and pictures inside documents "
-            "(screenshots, diagrams, photographed notes).\n\n"
-            "This needs OCR language data for German and English - a one-time download of about 6 MB "
-            "from github.com/tesseract-ocr.\n\n"
-            "Download it now?\n\n"
-            "(You can also do this later via ⚙ Menu → Download OCR language data.)")
-        if r == QMessageBox.Yes:
-            self.download_ocr()
-        else:
-            self._set_cfg("ocr_download_declined", True)
-            self.statusBar().showMessage("OCR skipped - you can download the data any time via ⚙ Menu", 8000)
+        dlg = LanguagePacksDialog(self, self.ocr, first_start)
+        if dlg.exec() != LanguagePacksDialog.Accepted:
+            if first_start or not self.ocr.available():
+                self._set_cfg("ocr_download_declined", True)
+                self.statusBar().showMessage("OCR skipped - choose ⚙ Menu → OCR language packs any time", 8000)
+            return
+        self._set_cfg("ocr_download_declined", False)
+        if dlg.to_remove:
+            self.ocr.remove(dlg.to_remove)
+            self.statusBar().showMessage(f"Removed {len(dlg.to_remove)} language pack(s)", 6000)
+        if dlg.to_install:
+            self.jobs.submit("ocr_download", [tuple(dlg.to_install)])
+            self._busy(True)
+
+    def _ask_ocr_download(self) -> None:
+        self.manage_ocr_packs(first_start=not self.config.get("ocr_first_start_asked"))
 
     def _maybe_ask_ocr_on_first_start(self) -> None:
         if (not self.config.get("ocr_first_start_asked") and self.config.get("ocr_enabled")
                 and not self.ocr.available()):
-            self._ask_ocr_download()
+            self.manage_ocr_packs(first_start=True)
 
     def _maybe_offer_ocr(self, paths) -> None:
         """When files that may need OCR are added and the data is still missing (and was never declined)."""
@@ -413,11 +417,6 @@ class MainWindow(QMainWindow):
             return
         if any(Path(p).is_dir() or Path(p).suffix.lower() in OCR_HINT_EXT for p in paths):
             self._ask_ocr_download()
-
-    def download_ocr(self):
-        self._set_cfg("ocr_download_declined", False)
-        self.jobs.submit("ocr_download", None)
-        self._busy(True)
 
     def reindex(self, docs: list[dict]) -> None:
         docs = [d for d in docs if d.get("id")]
@@ -641,11 +640,11 @@ class MainWindow(QMainWindow):
     def _on_ocr_failed(self, reason: str):
         QMessageBox.warning(
             self, "OCR download failed",
-            f"The OCR language data could not be downloaded:\n{reason}\n\n"
+            f"The OCR language packs could not be downloaded:\n{reason}\n\n"
             "Common causes: no internet access, or a company proxy/firewall blocking github.com.\n\n"
-            "Alternative: get the files eng.traineddata and deu.traineddata (e.g. from\n"
-            "github.com/tesseract-ocr/tessdata_fast) and copy them into this folder:\n"
-            f"{cfg.TESSDATA_DIR}\n\nThen choose ⚙ Menu → Re-read documents with warnings.")
+            "Alternative: get the files <pack>.traineddata (e.g. eng.traineddata, deu.traineddata) from\n"
+            "github.com/tesseract-ocr/tessdata_fast and copy them into this folder:\n"
+            f"{cfg.TESSDATA_DIR}\n\nThey are used after a restart; affected documents are re-read automatically.")
 
     def _on_doc_ready(self, doc):
         if doc.get("duplicate"):

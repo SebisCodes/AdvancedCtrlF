@@ -81,14 +81,19 @@ class JobThread(QThread):
             for item in (items or [None]):
                 if self._cancel or self._stop:
                     break
-                label = Path(item).name if isinstance(item, (str, Path)) else (item or {}).get("name", "OCR")
+                if kind == "ocr_download":
+                    label = "OCR language packs"
+                elif isinstance(item, (str, Path)):
+                    label = Path(item).name if kind == "add" else str(item)
+                else:
+                    label = (item or {}).get("name", "")
                 ctx = Context(self.config, self.ocr,
                               progress=lambda m, l=label, d=done: self.progress.emit(f"{l}: {m}", d, self.pending),
                               cancelled=lambda: self._cancel or self._stop)
                 try:
                     if kind == "ocr_download":
-                        self.ocr.download(lambda m: self.progress.emit(m, done, self.pending))
-                        self.message.emit("OCR language data installed")
+                        self.ocr.download(item, lambda m: self.progress.emit(m, done, self.pending))
+                        self.message.emit("OCR language packs installed")
                         self.ocr_installed.emit()
                     elif kind in ("add", "url"):
                         docs = (self.store.add_path(Path(item), ctx) if kind == "add"

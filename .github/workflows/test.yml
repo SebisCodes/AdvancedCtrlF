@@ -40,8 +40,8 @@ jobs:
         shell: cmd
         run: start.cmd setup
 
-      - name: Download OCR language data (app code)
-        run: $PY -I -c "import sys; sys.path.insert(0, '.'); from app.ocr import OcrEngine; from app import config as c; OcrEngine(c.TESSDATA_DIR, 300, c.DEFAULTS['tessdata_url']).download(print)"
+      - name: Install OCR language packs (app code; English, German, French)
+        run: $PY -I -c "import sys; sys.path.insert(0, '.'); from app.ocr import OcrEngine; from app import config as c; OcrEngine(c.TESSDATA_DIR, 300, c.DEFAULTS['tessdata_url']).download(['eng', 'deu', 'fra'], print)"
 
       - name: Unit tests
         run: $PY -I -W ignore tests/test_all.py

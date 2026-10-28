@@ -76,10 +76,16 @@ notes – are extracted and recognised, and the hit points to the page, slide or
 are recognised as a whole. Tiny images such as icons are skipped and a picture that appears several times
 (like a logo on every slide) is read and listed only once.
 
-**OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only the language data
-(German + English, ~6 MB) is required. On the **first start** the program asks whether to download it
-(once – the answer is remembered; it can be downloaded later via *Menu → Download OCR language data*). An existing
-Tesseract installation is reused automatically, in which case no question is asked.
+**OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only **language packs** are
+needed. *Menu → OCR language packs* lists 33 languages (English, German, French, Spanish, Italian, Portuguese, Dutch,
+Polish, Czech, Slovak, Swedish, Danish, Norwegian, Finnish, Turkish, Romanian, Hungarian, Croatian, Indonesian,
+Vietnamese, Russian, Ukrainian, Bulgarian, Greek, Arabic, Persian, Hebrew, Hindi, Thai, Japanese, Korean, Chinese
+simplified/traditional) – tick the ones you need, untick to delete them. On the **first start** this dialog opens with
+English, German and the system language preselected. Packs from an existing Tesseract installation are copied
+instead of downloaded.
+
+The **document language is detected automatically** (writing system plus common words, 33 languages): the first OCR
+pages are read with up to 4 installed packs, then only with the detected language – more accurate and faster.
 
 ## Searching
 
@@ -116,8 +122,8 @@ PDF and image pages with the hits highlighted.
   installation (pip output) and the exact error if the start fails.
 - `start.cmd debug` keeps the console window open on Windows.
 - **Yellow dot "…not read: OCR language data missing"** – the OCR data was not downloaded (declined or blocked by a
-  proxy/firewall). Use *Menu → Download OCR language data*; affected documents are re-read automatically afterwards.
-  Without internet access, copy `eng.traineddata` and `deu.traineddata` (from
+  proxy/firewall). Use *Menu → OCR language packs*; affected documents are re-read automatically afterwards.
+  Without internet access, copy the `<pack>.traineddata` files (from
   [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)) into `data/tessdata/` and restart.
 
 ## Folder layout
@@ -132,7 +138,7 @@ tests/                 automated tests
 config/config.json     settings                          (created on first start)
 data/documents/        copies of the added documents     (originals are never modified)
 data/index/            one JSON per document: text passages with their location
-data/tessdata/         OCR language data (downloaded on demand)
+data/tessdata/         OCR language packs (managed via Menu → OCR language packs)
 python/                local Python
 website/               the web page advanced-ctrl-f.giit.ch (not part of the download, see website/README.md)
 ```
