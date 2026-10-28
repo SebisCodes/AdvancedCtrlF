@@ -74,11 +74,31 @@ class OcrEngine:
                     os.unlink(tmp)
 
     # --- OCR -------------------------------------------------------------
-    def textpage(self, page, language: str = "deu+eng"):
+    def textpage(self, page, language: str = "deu+eng", dpi: int | None = None):
         td = self.tessdata()
         if td is None:
             raise RuntimeError("OCR language data is missing")
-        return page.get_textpage_ocr(language=language, dpi=self.dpi, full=True, tessdata=str(td))
+        return page.get_textpage_ocr(language=language, dpi=dpi or self.dpi, full=True, tessdata=str(td))
+
+
+def native_dpi(page, fallback: int = 300) -> int:
+    """Resolution at which a page should be OCR'd: that of its largest image.
+
+    Rendering above the image's own resolution only enlarges the letters - Tesseract
+    recognises noticeably less when glyphs get very big (e.g. a screenshot saved as PDF
+    rendered at 300 dpi is enlarged ~4x)."""
+    best, area = None, 0.0
+    try:
+        for info in page.get_image_info():
+            w_pt = info["bbox"][2] - info["bbox"][0]
+            if w_pt > 0 and info.get("width") and w_pt * (info["bbox"][3] - info["bbox"][1]) > area:
+                area = w_pt * (info["bbox"][3] - info["bbox"][1])
+                best = info["width"] / (w_pt / 72)
+    except Exception:
+        best = None
+    if not best:
+        return fallback
+    return int(max(72, min(fallback, best)))
 
 
 class LanguageTracker:
@@ -115,7 +135,8 @@ class ImageOCR:
     """
     MIN_SIDE = 24          # px - smaller images cannot contain readable text
     MIN_AREA = 12_000      # px² - skips icons and bullets
-    TARGET_WIDTH = 1600    # small screenshots are upscaled for better recognition
+    SMALL_WIDTH = 600      # only really small images are upscaled (max. 2x) -
+                           # enlarging normal images makes the letters too big and recognition worse
     MAX_PIXELS = 25_000_000
     MAX_IMAGES = 2000      # safety limit per document
 
@@ -132,13 +153,14 @@ class ImageOCR:
         import pymupdf
         if pix.width < self.MIN_SIDE or pix.height < self.MIN_SIDE or pix.width * pix.height < self.MIN_AREA:
             return None
-        if pix.colorspace is None or pix.colorspace.n not in (1, 3):
-            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)       # CMYK, indexed ... -> RGB
+        if pix.colorspace is None or pix.colorspace.n != 3:
+            pix = pymupdf.Pixmap(pymupdf.csRGB, pix)       # gray, CMYK, indexed ... -> RGB
+                                                            # (MuPDF's OCR returns nothing for gray pixmaps)
         if pix.alpha:
             pix = pymupdf.Pixmap(pix, 0)                    # drop transparency
         scale = 1.0
-        if pix.width < self.TARGET_WIDTH:
-            scale = min(3.0, self.TARGET_WIDTH / pix.width)
+        if pix.width < self.SMALL_WIDTH:
+            scale = min(2.0, self.SMALL_WIDTH / pix.width)
         if pix.width * pix.height * scale * scale > self.MAX_PIXELS:
             scale = (self.MAX_PIXELS / (pix.width * pix.height)) ** 0.5
         if abs(scale - 1.0) > 0.05:

@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .. import lang as langmod
-from ..ocr import ImageOCR, LanguageTracker
+from ..ocr import ImageOCR, LanguageTracker, native_dpi
 from .base import Chunker, Context, ExtractError, Result
 
 
@@ -19,11 +19,12 @@ def _pymupdf():
 
 
 def _ocr_page(page, ctx: Context, tracker: LanguageTracker):
-    tp = ctx.ocr.textpage(page, tracker.current())
+    dpi = native_dpi(page, ctx.ocr.dpi)  # never enlarge beyond the scan's own resolution
+    tp = ctx.ocr.textpage(page, tracker.current(), dpi)
     text = page.get_text("text", textpage=tp)
     better = tracker.learn(text)
     if better and better != "deu+eng":
-        tp = ctx.ocr.textpage(page, better)
+        tp = ctx.ocr.textpage(page, better, dpi)
     return tp
 
 

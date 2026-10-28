@@ -232,7 +232,7 @@ class MainWindow(QMainWindow):
         lay.addWidget(self.docs, 1)
         self.docs_empty = QLabel("Drag documents here\n\nPDF · Word · PowerPoint · Excel\nOpenDocument · HTML · CSV · XML\n"
                                  "Images · e-mails · ZIP …", objectName="muted", alignment=Qt.AlignCenter)
-        lay.addWidget(self.docs_empty)
+        lay.addWidget(self.docs_empty, 1)  # takes the free space while the list is hidden, title stays on top
         row = QHBoxLayout()
         b_add = QPushButton("+ Files", objectName="primary")
         b_add.clicked.connect(self.add_files_dialog)

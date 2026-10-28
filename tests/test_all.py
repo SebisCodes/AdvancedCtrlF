@@ -149,6 +149,23 @@ class ImageOcrTests(Base):
         _, locs = self.ocr_hits("protokoll.odt", "Whiteboard")
         self.assertEqual([(l["para"], l["part"]) for l in locs], [(4, "Image (OCR)")])
 
+    def test_grayscale_image(self):
+        import pymupdf
+        from app.ocr import ImageOCR
+        if not self.ocr.available():
+            self.skipTest("no OCR language data available")
+        gray = pymupdf.Pixmap(pymupdf.csGRAY, pymupdf.Pixmap(samples.text_png("Grayscale scan readable")))
+        self.assertIn("Grayscale", ImageOCR(self.ctx).read("k", gray.tobytes("png")))
+
+    def test_ocr_at_native_resolution(self):
+        import pymupdf
+        from app.ocr import native_dpi
+        doc = pymupdf.open()
+        page = doc.new_page(width=800, height=400)   # 1083 px wide image on 800 pt -> 97 dpi
+        page.insert_image(page.rect, stream=samples.text_png("x"))
+        self.assertEqual(native_dpi(page, 300), 97)
+        self.assertEqual(native_dpi(doc.new_page(), 300), 300)  # no image: default
+
     def test_disabled(self):
         ctx = Context(dict(cfg.DEFAULTS, ocr_all_images=False), self.ocr)
         res = extract(self.tmp / "in" / "bericht.pptx", ctx)
