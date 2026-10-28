@@ -22,10 +22,18 @@ The first start prepares Python and installs the required packages (a few minute
 1. `PYTHON_BIN` – set it at the top of the launcher (or as environment variable) to use a specific interpreter
 2. a Python inside the `python/` subfolder
 3. an **archive** in `python/` – `.zip`, `.tar.gz`, `.tgz`, `.tar.xz` (Linux also `.deb`; Windows also an official
-   `python-*.exe` installer) – is extracted/installed automatically and used
-4. otherwise the **latest stable CPython** is downloaded from
-   [python-build-standalone](https://github.com/astral-sh/python-build-standalone) and its **SHA256 checksum is verified**
+   `python-*.exe` installer) – is extracted/installed automatically and used. The Windows *embeddable* ZIP from
+   python.org works too: pip is set up automatically (official wheel from PyPI, SHA256-verified)
+4. otherwise the **latest stable CPython** is downloaded and verified:
+   - **Windows:** the official build of the Python Software Foundation (NuGet package `python`) – SHA512 checked
+     against the NuGet catalog and `python.exe` must carry a valid PSF code signature, so Smart App Control and
+     Defender do not block it
+   - **Linux:** [python-build-standalone](https://github.com/astral-sh/python-build-standalone), SHA256 checked
+     against the published checksums
 5. last resort: the system Python, inside a dedicated venv in `python/venv`
+
+If a Python in `python/` cannot be started (for example because Windows blocks it), the Windows launcher sets it
+aside as `python/_blocked` and downloads the signed official build instead.
 
 Set `PY_VERSION=3.13` in the launcher to pin a version. Packages from `requirements.txt` are installed as prebuilt
 wheels only (nothing is compiled) and only re-installed when `requirements.txt` changes.
@@ -72,6 +80,9 @@ Evince, zathura, … or a browser), web pages in the browser scrolled to the hit
 (VS Code, Notepad++, Kate, gedit, …), everything else in its default application. The built-in page view renders
 PDF and image pages with the hits highlighted.
 
+> **Tip (Windows):** keep the program folder outside of OneDrive/Dropbox. Python and its packages are several
+> thousand files – syncing them is slow and triggers OneDrive's "delete these items?" prompts.
+
 ## Folder layout
 
 ```
@@ -93,7 +104,7 @@ The JSON files in `data/index/` are plain and documented by example – each pas
 ## Security
 
 - Python runs in isolated mode (`-I`): no `PYTHONPATH`, no user site-packages, no current directory on `sys.path`
-- Downloads only over HTTPS; the Python download is verified against the published SHA256 checksums
+- Downloads only over HTTPS; every download is verified (published checksums, and on Windows also the code signature)
 - XML with entity definitions is rejected (no XXE / "billion laughs"); archives are extracted without path
   traversal, links, or unbounded sizes
 - Documents are copied without execute permission; executable file types are never launched

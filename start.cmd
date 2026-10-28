@@ -8,8 +8,8 @@ rem    2. a python.exe inside the .\python\ subfolder
 rem    3. an archive in .\python\ (.zip / .tar.gz / .tgz) -> extracted,
 rem       or an official Python installer (python-*.exe) -> installed
 rem       silently into .\python\installed
-rem    4. download of the latest stable CPython (python-build-standalone,
-rem       SHA256-verified) into .\python\
+rem    4. download of the latest stable official CPython (Python Software
+rem       Foundation NuGet package; SHA512 + digital signature verified)
 rem    5. fallback: system Python (py -3 / python) in its own venv
 rem
 rem  Usage:  start.cmd           start normally (no console window)
@@ -35,13 +35,8 @@ if defined PYTHON_BIN (
         goto :error
     )
 )
-if not defined PY call :find_python
-if not defined PY call :extract_archives
-if not defined PY call :find_python
-if not defined PY call :download_python
-if not defined PY call :find_python
-if not defined PY call :system_venv
-if not defined PY call :find_python
+call :locate_python
+if defined PY call :check_python
 if not defined PY (
     echo [Advanced Ctrl+F] No Python found. Put a Python or an archive into "%PY_DIR%"
     echo                   or set PYTHON_BIN at the top of this file.
@@ -66,12 +61,42 @@ goto :eof
 
 
 rem =====================================================================
+:locate_python
+if not defined PY call :find_python
+if not defined PY call :extract_archives
+if not defined PY call :find_python
+if not defined PY call :download_python
+if not defined PY call :find_python
+if not defined PY call :system_venv
+if not defined PY call :find_python
+goto :eof
+
+:check_python
+rem Make sure the interpreter can actually run (Windows may block unsigned programs)
+"%PY%" -I -c "import sys" >nul 2>&1
+if not errorlevel 1 goto :eof
+echo [Advanced Ctrl+F] "%PY%" cannot be started - probably blocked by Windows security.
+if /i not "%PY%"=="%PY_DIR%\python\python.exe" (
+    set "PY="
+    goto :eof
+)
+echo [Advanced Ctrl+F] Replacing it with the official, signed Python ...
+if exist "%PY_DIR%\_blocked" rd /s /q "%PY_DIR%\_blocked"
+move "%PY_DIR%\python" "%PY_DIR%\_blocked" >nul
+set "PY="
+call :download_python
+call :find_python
+if not defined PY goto :eof
+"%PY%" -I -c "import sys" >nul 2>&1
+if errorlevel 1 set "PY="
+goto :eof
+
 :find_python
 set "PY="
 if exist "%PY_DIR%\python.exe" ( set "PY=%PY_DIR%\python.exe" & goto :eof )
 if exist "%PY_DIR%\python\python.exe" ( set "PY=%PY_DIR%\python\python.exe" & goto :eof )
 if exist "%PY_DIR%\venv\Scripts\python.exe" ( set "PY=%PY_DIR%\venv\Scripts\python.exe" & goto :eof )
-for /f "delims=" %%F in ('dir /b /s /a-d "%PY_DIR%\python.exe" 2^>nul ^| findstr /v /i "\\Lib\\venv\\ \\_archive\\"') do (
+for /f "delims=" %%F in ('dir /b /s /a-d "%PY_DIR%\python.exe" 2^>nul ^| findstr /v /i "\\Lib\\venv\\ \\_archive\\ \\_blocked\\ \\_download\\"') do (
     if not defined PY set "PY=%%F"
 )
 goto :eof
