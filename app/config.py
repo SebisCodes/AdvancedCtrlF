@@ -28,6 +28,7 @@ DEFAULTS: dict = {
     "ocr_dpi": 300,
     "ocr_min_chars": 25,          # less text on a page -> OCR
     "ocr_download_declined": False,
+    "ocr_first_start_asked": False,  # the download question is asked once on the first start
     "tessdata_url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata",
     "max_file_mb": 500,
     "max_results": 300,

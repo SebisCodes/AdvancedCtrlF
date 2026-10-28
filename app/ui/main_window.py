@@ -30,8 +30,9 @@ TYPE_FILTERS = [
     ("Images (OCR)", {"png", "jpg", "jpeg", "tif", "tiff", "bmp", "gif", "webp"}),
     ("Text / code / e-mail", {"txt", "md", "log", "json", "eml", "epub"}),
 ]
-OCR_HINT_EXT = {".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp", ".zip",
-                ".tar", ".gz", ".tgz", ".xz", ".bz2"}
+OCR_HINT_EXT = {".pdf", ".xps", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp", ".gif", ".webp",
+                ".docx", ".docm", ".pptx", ".pptm", ".ppsx", ".xlsx", ".xlsm", ".odt", ".odp", ".ods",
+                ".zip", ".tar", ".gz", ".tgz", ".xz", ".bz2"}
 UNITS = {"pptx": "slides", "pptm": "slides", "odp": "slides", "xlsx": "sheets", "xls": "sheets", "ods": "sheets",
          "csv": "lines", "tsv": "lines", "txt": "lines", "epub": "chapters"}
 
@@ -335,20 +336,34 @@ class MainWindow(QMainWindow):
         self.jobs.submit("add", paths)
         self._busy(True)
 
-    def _maybe_offer_ocr(self, paths) -> None:
-        if not self.config.get("ocr_enabled") or self.ocr.available() or self.config.get("ocr_download_declined"):
-            return
-        if not any(Path(p).is_dir() or Path(p).suffix.lower() in OCR_HINT_EXT for p in paths):
-            return
+    def _ask_ocr_download(self) -> None:
+        """Ask whether to download the OCR language data; remembers a "no"."""
+        self._set_cfg("ocr_first_start_asked", True)
         r = QMessageBox.question(
             self, "Text recognition (OCR)",
-            "Reading scanned PDFs and images needs OCR language data for German and English "
-            "(one-time download of about 6 MB from github.com/tesseract-ocr).\n\nDownload it now?")
+            "Advanced Ctrl+F can read text in scanned PDFs, image files and pictures inside documents "
+            "(screenshots, diagrams, photographed notes).\n\n"
+            "This needs OCR language data for German and English - a one-time download of about 6 MB "
+            "from github.com/tesseract-ocr.\n\n"
+            "Download it now?\n\n"
+            "(You can also do this later via ⚙ Menu → Download OCR language data.)")
         if r == QMessageBox.Yes:
-            self.jobs.submit("ocr_download", None)
+            self.download_ocr()
         else:
             self._set_cfg("ocr_download_declined", True)
             self.statusBar().showMessage("OCR skipped - you can download the data any time via ⚙ Menu", 8000)
+
+    def _maybe_ask_ocr_on_first_start(self) -> None:
+        if (not self.config.get("ocr_first_start_asked") and self.config.get("ocr_enabled")
+                and not self.ocr.available()):
+            self._ask_ocr_download()
+
+    def _maybe_offer_ocr(self, paths) -> None:
+        """When files that may need OCR are added and the data is still missing (and was never declined)."""
+        if not self.config.get("ocr_enabled") or self.ocr.available() or self.config.get("ocr_download_declined"):
+            return
+        if any(Path(p).is_dir() or Path(p).suffix.lower() in OCR_HINT_EXT for p in paths):
+            self._ask_ocr_download()
 
     def download_ocr(self):
         self._set_cfg("ocr_download_declined", False)
@@ -561,6 +576,7 @@ class MainWindow(QMainWindow):
         self.search.setFocus()
         if self.search.text().strip():
             self.run_search()
+        QTimer.singleShot(300, self._maybe_ask_ocr_on_first_start)  # after the window is visible
 
     def _on_doc_ready(self, doc):
         if doc.get("duplicate"):

@@ -63,8 +63,9 @@ are recognised as a whole. Tiny images such as icons are skipped and a picture t
 (like a logo on every slide) is read and listed only once.
 
 **OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only the language data
-(German + English, ~6 MB) is required. The program asks once before downloading it; an existing Tesseract
-installation is reused automatically.
+(German + English, ~6 MB) is required. On the **first start** the program asks whether to download it
+(once – the answer is remembered; it can be downloaded later via *Menu → Download OCR language data*). An existing
+Tesseract installation is reused automatically, in which case no question is asked.
 
 ## Searching
 
