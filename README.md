@@ -56,9 +56,19 @@ wheels only (nothing is compiled) and only re-installed when `requirements.txt` 
 | Images (`.png`, `.jpg`, `.tif`, …) via OCR | page |
 | ZIP / TAR archives – every file inside is added individually | – |
 
-Legacy binary formats (`.doc`, `.ppt`) are converted with LibreOffice if it is installed, otherwise their raw text
-is indexed. Unknown files are indexed if they look like text.
+**Any other file** can be added too: binaries (programs, databases, fonts, media …) are searchable by their file
+name and by readable text strings inside; every file is at least found by its name. Jupyter notebooks are read cell
+by cell (`Cell 3 · Code`).
 
+**Repositories:** a folder that is a Git repository is added exactly as Git sees it (`.gitignore` respected, needs
+`git` installed); otherwise `.git`, `node_modules`, virtual environments and caches are skipped. Public **GitHub**
+repositories can be added directly – *Menu → Add from link / GitHub repository* or drag the link from the browser:
+`https://github.com/owner/repo` (default branch), `…/tree/branch/folder` (one branch or folder) or `…/blob/…` (one
+file). Any other `https://` link to a file works as well. Hits show up as `owner/repo › path/file.py`;
+`file:repo` restricts the search to it.
+
+Legacy binary formats (`.doc`, `.ppt`) are converted with LibreOffice if it is installed, otherwise their raw text
+is indexed. 
 **Images inside documents are read with OCR as well** (on by default, menu → *Always OCR all images inside
 documents*): pictures in PDFs, Word, PowerPoint, Excel and OpenDocument files – screenshots, diagrams, scanned
 notes – are extracted and recognised, and the hit points to the page, slide or cell where the picture sits
@@ -124,6 +134,7 @@ data/documents/        copies of the added documents     (originals are never mo
 data/index/            one JSON per document: text passages with their location
 data/tessdata/         OCR language data (downloaded on demand)
 python/                local Python
+website/               the web page advanced-ctrl-f.giit.ch (not part of the download, see website/README.md)
 ```
 
 The JSON files in `data/index/` are plain and documented by example – each passage looks like

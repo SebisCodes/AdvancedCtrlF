@@ -424,7 +424,7 @@ def target_of(loc: dict, text: str, offset: int) -> dict:
     if loc.get("lines"):  # explicit offset -> source line map (HTML/XML)
         pos, line = max((m for m in loc["lines"] if m[0] <= offset), default=loc["lines"][0])
         t["line"] = line + text.count("\n", pos, offset)
-    elif "line" in loc and loc.get("kind") in ("line", "page", "chapter"):
+    elif "line" in loc and loc.get("kind") in ("line", "page", "chapter", "nbcell"):
         t["line"] = loc["line"] + nl
     t.pop("lines", None)
     for pos, ref in reversed(loc.get("cells") or []):
@@ -459,6 +459,10 @@ def format_location(t: dict) -> str:
         s = f"Chapter {t.get('chapter')}"
     elif kind == "image":
         s = "Image"
+    elif kind == "nbcell":
+        s = f"Cell {t.get('cell')}" + (f", l. {t['line']}" if t.get("line") and t.get("line") > 1 else "")
+    elif kind == "file":
+        s = "File name"
     else:
         s = ""
     if t.get("part"):

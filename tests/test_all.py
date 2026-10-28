@@ -172,6 +172,101 @@ class ImageOcrTests(Base):
         self.assertFalse(any("Revenue" in c["text"] for c in res.chunks))
 
 
+class AnyFileAndRepositoryTests(Base):
+    """Every file type is accepted; folders/archives behave like repositories."""
+
+    def store(self):
+        from app.store import Store
+        cfg.DOCS_DIR, cfg.INDEX_DIR = self.tmp / f"docs{id(self)}", self.tmp / f"index{id(self)}"
+        return Store(dict(cfg.DEFAULTS))
+
+    def test_binary_file_found_by_name_and_strings(self):
+        f = self.tmp / "firmware_update.bin"
+        f.write_bytes(bytes(range(256)) * 50 + b"\x00Error: calibration sensor timeout\x00" + bytes(range(256)) * 50)
+        doc = self.store().add_path(f, self.ctx)[0]
+        self.assertEqual(doc["status"], "ok")
+        self.assertIn("calibration sensor timeout", "\n".join(c["text"] for c in doc["chunks"]))
+        ix = SearchIndex()
+        ix.add(doc)
+        self.assertTrue(ix.search("firmware")[0])            # by file name
+
+    def test_file_without_text_still_searchable(self):
+        f = self.tmp / "holiday_photo.raw"
+        f.write_bytes(bytes(range(256)) * 400)
+        doc = self.store().add_path(f, self.ctx)[0]
+        self.assertEqual([c["loc"]["kind"] for c in doc["chunks"]], ["file"])
+        ix = SearchIndex()
+        ix.add(doc)
+        hits, _ = ix.search("holiday photo")
+        self.assertEqual(format_location(target_of(ix.chunk_of(hits[0])["loc"], "", 0)), "File name")
+
+    def test_text_without_extension_and_notebook(self):
+        (self.tmp / "Makefile").write_text("build:\n\tgcc -o tool main.c\n", encoding="utf-8")
+        _, text = self.texts_at(self.tmp / "Makefile")
+        self.assertIn("gcc -o tool", text)
+        nb = {"cells": [{"cell_type": "markdown", "source": ["# Data cleaning"]},
+                        {"cell_type": "code", "source": ["df = load()\n", "df.dropna()"],
+                         "outputs": [{"output_type": "stream", "text": ["42 rows removed"]}]}]}
+        (self.tmp / "analysis.ipynb").write_text(__import__("json").dumps(nb), encoding="utf-8")
+        res, _ = self.texts_at(self.tmp / "analysis.ipynb")
+        by = {c["text"]: c["loc"] for c in res.chunks}
+        self.assertEqual(format_location(target_of(by["df = load()\ndf.dropna()"], "df = load()\ndf.dropna()", 13)),
+                         "Cell 2, l. 2 · Code")
+        self.assertEqual(by["42 rows removed"]["part"], "Output")
+
+    def texts_at(self, path):
+        res = extract(path, self.ctx)
+        return res, "\n".join(c["text"] for c in res.chunks)
+
+    def make_project(self, name):
+        root = self.tmp / name
+        for rel, text in {"src/app.py": "def checkout_cart(): pass", "README.md": "Project overview",
+                          "node_modules/lib/index.js": "dependency code", ".venv/lib/x.py": "venv",
+                          "build/secret.txt": "ignored by gitignore", ".gitignore": "build/\n"}.items():
+            (root / rel).parent.mkdir(parents=True, exist_ok=True)
+            (root / rel).write_text(text, encoding="utf-8")
+        return root
+
+    def test_folder_skips_dependency_and_cache_folders(self):
+        root = self.make_project("plainproject")
+        names = {d["display_name"] for d in self.store().add_path(root, self.ctx)}
+        self.assertIn("plainproject/src/app.py", names)
+        self.assertFalse(any("node_modules" in n or ".venv" in n for n in names), names)
+
+    def test_git_repository_respects_gitignore(self):
+        import shutil as sh
+        import subprocess
+        if not sh.which("git"):
+            self.skipTest("git not installed")
+        root = self.make_project("gitproject")
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        names = {d["display_name"] for d in self.store().add_path(root, self.ctx)}
+        self.assertIn("gitproject/src/app.py", names)
+        self.assertNotIn("gitproject/build/secret.txt", names)            # .gitignore
+        self.assertFalse(any("node_modules" in n for n in names))
+
+    def test_repository_archive_with_subfolder(self):
+        import zipfile
+        z = self.tmp / "repo.zip"
+        with zipfile.ZipFile(z, "w") as zf:      # GitHub layout: one top folder "<repo>-<branch>/"
+            zf.writestr("shop-main/docs/guide.md", "Payment guide")
+            zf.writestr("shop-main/src/cart.py", "def total(): pass")
+            zf.writestr("shop-main/node_modules/x.js", "dependency")
+        store = self.store()
+        names = {d["display_name"] for d in store.add_repository_archive(z, "acme/shop", self.ctx, extra={"source": "s"})}
+        self.assertEqual(names, {"acme/shop › docs/guide.md", "acme/shop › src/cart.py"})
+        sub = store.add_repository_archive(z, "acme/shop@main", self.ctx, subpath="docs")
+        self.assertEqual([d.get("display_name") or d.get("name") for d in sub], ["guide.md"])  # duplicate content
+
+    def test_link_parsing(self):
+        from app.remote import parse
+        self.assertEqual(parse("https://github.com/acme/shop/tree/dev/docs/api")["path"], "docs/api")
+        self.assertEqual(parse("https://github.com/acme/shop.git")["repo"], "shop")
+        self.assertEqual(parse("https://example.org/a.pdf")["kind"], "file")
+        with self.assertRaises(ExtractError):
+            parse("http://example.org/a.pdf")
+
+
 class StoreAndSearchTests(Base):
     def test_store_archive_and_search(self):
         from app.store import Store

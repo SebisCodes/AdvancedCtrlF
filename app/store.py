@@ -8,6 +8,7 @@ import os
 import re
 import shutil
 import stat
+import subprocess
 import tarfile
 import tempfile
 import threading
@@ -21,9 +22,63 @@ from .extractors import Context, ExtractError, extract, is_archive, sniff, suffi
 log = logging.getLogger(__name__)
 
 MAX_ARCHIVE_TOTAL = 4 * 1024 ** 3   # protection against zip bombs
-MAX_ARCHIVE_MEMBERS = 20000
+MAX_ARCHIVE_MEMBERS = 100_000      # large repositories have tens of thousands of files
 MAX_ARCHIVE_DEPTH = 3
 SCHEMA = 1
+
+# Folders that hold version control data, installed dependencies, caches or virtual
+# environments - never documents. Skipped in folders and archives.
+SKIP_DIRS = {".git", ".hg", ".svn", "node_modules", "__pycache__", ".venv", "venv", ".tox", ".nox",
+             ".mypy_cache", ".pytest_cache", ".ruff_cache", ".idea", ".gradle", ".terraform", "__MACOSX",
+             ".ipynb_checkpoints", "bower_components", ".next", ".nuxt", ".parcel-cache", ".cache"}
+SKIP_FILES = {".DS_Store", "Thumbs.db", "desktop.ini", ".localized"}
+
+
+def skipped(rel_parts) -> bool:
+    *dirs, name = rel_parts
+    return name in SKIP_FILES or any(d in SKIP_DIRS for d in dirs)
+
+
+def _git_files(folder: Path) -> list[Path] | None:
+    """Files of a Git working tree as Git sees them (tracked + untracked, .gitignore respected).
+    None if `folder` is not a repository root or git is not available."""
+    git = shutil.which("git")
+    if not git or not (folder / ".git").exists():
+        return None
+    try:
+        # core.fsmonitor could run a program configured by the (untrusted) repository - disabled
+        r = subprocess.run([git, "-c", "core.fsmonitor=false", "-C", str(folder), "ls-files", "-z",
+                            "--cached", "--others", "--exclude-standard"],
+                           capture_output=True, timeout=120, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    if r.returncode != 0:
+        return None
+    files = []
+    for rel in r.stdout.decode("utf-8", "replace").split("\0"):
+        if not rel:
+            continue
+        p = folder / rel
+        if p.is_file() and not p.is_symlink() and not skipped(Path(rel).parts):
+            files.append(p)
+    log.info("Git repository %s: %d files from git ls-files", folder.name, len(files))
+    return files
+
+
+def list_folder(folder: Path) -> list[Path]:
+    """All document files below `folder` (Git-aware, without dependency/cache folders)."""
+    files = _git_files(folder)
+    if files is not None:
+        return sorted(files)
+    files = []
+    for dirpath, dirnames, filenames in os.walk(folder):
+        dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS and not os.path.islink(os.path.join(dirpath, d)))
+        for name in sorted(filenames):
+            p = Path(dirpath, name)
+            if name not in SKIP_FILES and p.is_file() and not p.is_symlink():
+                files.append(p)
+    return files
 
 _WIN_RESERVED = {"con", "prn", "aux", "nul", *(f"com{i}" for i in range(1, 10)), *(f"lpt{i}" for i in range(1, 10))}
 
@@ -64,7 +119,7 @@ def unpack_archive(path: Path, dest: Path) -> list[Path]:
     def write(member_name: str, size: int, opener) -> None:
         nonlocal total
         rel = _safe_member_path(member_name)
-        if rel is None:
+        if rel is None or skipped(rel.parts):
             return
         total += size
         if total > MAX_ARCHIVE_TOTAL or len(out) >= MAX_ARCHIVE_MEMBERS:
@@ -125,16 +180,22 @@ class Store:
         return cfg.DOCS_DIR / Path(doc["stored"]).name
 
     # ------------------------------------------------------------ Adding
-    def add_path(self, src: Path, ctx: Context, display_prefix: str = "", depth: int = 0) -> list[dict]:
-        """Add a file, folder or archive. Returns new/updated documents."""
+    def add_path(self, src: Path, ctx: Context, display_prefix: str = "", depth: int = 0,
+                 extra: dict | None = None, base: Path | None = None) -> list[dict]:
+        """Add a file, folder or archive. Returns new/updated documents.
+        `extra` is stored with every document (e.g. the source URL); for folders, display
+        names are relative to `base` (default: the folder's parent, i.e. include its name)."""
         if src.is_dir():
             docs = []
-            for p in sorted(src.rglob("*")):
+            base = base or src.parent
+            files = list_folder(src)
+            for n, p in enumerate(files, 1):
                 if ctx.cancelled():
                     break
-                if p.is_file() and not p.is_symlink():
-                    folder = p.parent.relative_to(src.parent).as_posix()
-                    docs += self.add_path(p, ctx, f"{display_prefix}{folder}/", depth)
+                ctx.progress(f"File {n}/{len(files)}")
+                folder = p.parent.relative_to(base).as_posix()
+                prefix = display_prefix + ("" if folder == "." else f"{folder}/")
+                docs += self.add_path(p, ctx, prefix, depth, extra)
             return docs
         size = src.stat().st_size
         if size > self.config.get("max_file_mb", 500) * 1024 * 1024:
@@ -152,11 +213,31 @@ class Store:
                         break
                     rel = f.relative_to(tmp).as_posix()
                     prefix = f"{display_prefix}{src.name} › {rel.rsplit('/', 1)[0] + '/' if '/' in rel else ''}"
-                    docs += self.add_path(f, ctx, prefix, depth + 1)
+                    docs += self.add_path(f, ctx, prefix, depth + 1, extra)
             return docs
-        return [self._add_file(src, ctx, display_prefix)]
+        return [self._add_file(src, ctx, display_prefix, extra)]
 
-    def _add_file(self, src: Path, ctx: Context, display_prefix: str) -> dict:
+    def add_repository_archive(self, archive: Path, label: str, ctx: Context, subpath: str = "",
+                               extra: dict | None = None) -> list[dict]:
+        """A downloaded repository snapshot (e.g. GitHub ZIP): files are shown as
+        "label › path/in/repo", optionally only those below `subpath`."""
+        ctx.progress(f"Unpacking {label} …")
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                unpack_archive(archive, Path(tmp))
+            except (ExtractError, zipfile.BadZipFile, tarfile.TarError, OSError) as e:
+                return [self._error_doc(archive, f"{label} › ", f"Archive could not be read: {e}")]
+            tops = [p for p in Path(tmp).iterdir()]
+            root = tops[0] if len(tops) == 1 and tops[0].is_dir() else Path(tmp)   # "repo-main/" folder
+            start = root / subpath if subpath else root
+            if not start.exists():
+                return [self._error_doc(archive, f"{label} › ", f"Folder {subpath!r} not found in the repository")]
+            if start.is_file():
+                rel = start.parent.relative_to(root).as_posix()
+                return self.add_path(start, ctx, f"{label} › " + ("" if rel == "." else f"{rel}/"), 0, extra)
+            return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root)
+
+    def _add_file(self, src: Path, ctx: Context, display_prefix: str, extra: dict | None = None) -> dict:
         sha = sha1_file(src)
         with self._lock:
             existing = self._by_sha.get(sha)
@@ -172,6 +253,7 @@ class Store:
             "schema": SCHEMA, "id": doc_id, "sha1": sha, "name": src.name,
             "display_name": display_prefix + src.name, "stored": stored_name,
             "size": src.stat().st_size, "added": datetime.now().isoformat(timespec="seconds"),
+            **(extra or {}),
         }
         self._extract_into(doc, target, ctx)
         self._save(doc)
@@ -195,6 +277,8 @@ class Store:
             doc["needs_ocr"] = bool(res.meta.get("ocr_skipped"))
             if res.meta.get("warning"):
                 doc["status"], doc["message"] = "warn", res.meta["warning"]
+            elif res.meta.get("note"):
+                doc["message"] = res.meta["note"]
             elif doc["needs_ocr"]:
                 doc["status"], doc["message"] = "warn", (f"{res.meta['ocr_skipped']} image(s) not read: "
                                                          "OCR language data missing - ⚙ Menu → Download OCR language data")
@@ -205,6 +289,9 @@ class Store:
         except Exception as e:  # broken files must never stop the program
             log.exception("Error in %s", path)
             doc["status"], doc["message"] = "error", f"{type(e).__name__}: {e}"
+        if not doc["chunks"]:
+            # Every file can at least be found by its name (and folder), even without any text
+            doc["chunks"] = [{"loc": {"kind": "file"}, "text": doc.get("display_name") or doc["name"]}]
         doc["indexed"] = datetime.now().isoformat(timespec="seconds")
         level = {"ok": logging.INFO, "warn": logging.WARNING}.get(doc["status"], logging.ERROR)
         log.log(level, "Read %s [%s]: %s chunks, %s OCR page(s), %s OCR image(s)%s", doc.get("display_name") or doc["name"],

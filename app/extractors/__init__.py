@@ -39,6 +39,7 @@ HANDLERS = {
     ".rtf": textual.extract_rtf,
     ".eml": textual.extract_eml,
     ".epub": textual.extract_epub,
+    ".ipynb": textual.extract_ipynb,
 }
 
 
@@ -159,7 +160,43 @@ def extract(path: Path, ctx: Context, kind: str | None = None) -> Result:
         head = f.read(8192)
     if looks_like_text(head):
         return textual.extract_text(path, ctx)
-    raise ExtractError("File format is not supported")
+    return extract_binary(path, head)
+
+
+# Magic numbers of common binary formats - only used to describe the file
+_MAGIC = [
+    (b"MZ", "Windows program or library"), (b"\x7fELF", "Linux program or library"),
+    (b"\xcf\xfa\xed\xfe", "macOS program or library"), (b"\xca\xfe\xba\xbe", "macOS program or Java class"),
+    (b"SQLite format 3\x00", "SQLite database"), (b"\x00\x01\x00\x00\x00", "font"), (b"OTTO", "font"),
+    (b"wOFF", "web font"), (b"wOF2", "web font"), (b"ID3", "MP3 audio"), (b"\xff\xfb", "MP3 audio"),
+    (b"fLaC", "FLAC audio"), (b"OggS", "Ogg audio/video"), (b"RIFF", "RIFF media (WAV/AVI)"),
+    (b"\x1aE\xdf\xa3", "Matroska/WebM video"), (b"7z\xbc\xaf\x27\x1c", "7-Zip archive"), (b"Rar!", "RAR archive"),
+    (b"\x1f\x8b", "gzip-compressed file"), (b"BZh", "bzip2-compressed file"), (b"\xfd7zXZ", "xz-compressed file"),
+    (b"PK", "ZIP-based file"), (b"\xd0\xcf\x11\xe0", "legacy Microsoft Office/OLE file"),
+    (b"GIF8", "GIF image"), (b"8BPS", "Photoshop image"),
+]
+
+
+def describe_binary(head: bytes) -> str:
+    if head[4:8] == b"ftyp":
+        return "MP4/MOV/HEIC media"
+    for magic, label in _MAGIC:
+        if head.startswith(magic):
+            return label
+    return "binary file"
+
+
+def extract_binary(path: Path, head: bytes) -> Result:
+    """Any other file: the file name is searchable (see store) plus readable text
+    strings found inside (e.g. messages in programs, metadata in media files)."""
+    from .base import Chunker, add_lines
+    with open(path, "rb") as f:
+        data = f.read(50 * 1024 * 1024)
+    text = binary_strings(data)[:300_000]
+    ch = Chunker()
+    add_lines(ch, text, {"kind": "part", "part": "Readable strings"}, lines_per_chunk=20)
+    note = f"{describe_binary(head).capitalize()} - file name" + (" and readable text strings" if ch.chunks else "") + " searchable"
+    return Result(ch.chunks, {"note": note})
 
 
 __all__ = ["Context", "ExtractError", "Result", "extract", "sniff", "is_archive", "suffix"]

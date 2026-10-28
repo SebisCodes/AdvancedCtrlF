@@ -158,5 +158,21 @@ def binary_strings(data: bytes) -> str:
     parts = [m.decode("utf-16-le", "ignore") for m in _STR_U16.findall(data)]
     if sum(len(p) for p in parts) < 200:
         parts += [m.decode("cp1252", "ignore") for m in _STR_ASCII.findall(data)]
-    keep = [p.strip() for p in parts if sum(ch.isalpha() for ch in p) >= len(p) * 0.6]
-    return "\n".join(keep)
+    return "\n".join(p.strip() for p in parts if _readable(p.strip()))
+
+
+_WORDLIKE = re.compile(r"[^\W\d_]{2,25}")
+_VOWELS = set("aeiouyäöüàáâèéêìíîòóôùúûAEIOUYÄÖÜ")
+
+
+def _readable(s: str) -> bool:
+    """Heuristic: does a string from binary data look like human-readable text?
+    Rejects byte runs such as "ABCDEFGHIJ…" or "ÀÁÂÃÄÅ…" and identifiers without words."""
+    if len(s) < 6 or max((len(t) for t in s.split()), default=0) > 30:
+        return False
+    words = _WORDLIKE.findall(s)
+    if sum(len(w) for w in words) < 0.6 * len(s):
+        return False
+    real = [w for w in words if len(w) >= 3 and any(c in _VOWELS for c in w)
+            and not any(w[i] == w[i + 1] == w[i + 2] for i in range(len(w) - 2))]
+    return len(real) >= (2 if len(s) > 15 else 1)

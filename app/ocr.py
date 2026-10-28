@@ -7,15 +7,13 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import shutil
-import subprocess
 import time
 import urllib.parse
-import urllib.request
 from pathlib import Path
 
 from . import lang as langmod
+from . import net
 
 log = logging.getLogger(__name__)
 
@@ -42,24 +40,11 @@ MIRROR = "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{lang}.tr
 
 
 def _fetch_python(url: str, dest: Path) -> None:
-    req = urllib.request.Request(url, headers={"User-Agent": "AdvancedCtrlF"})
-    with urllib.request.urlopen(req, timeout=60) as r, open(dest, "wb") as f:
-        shutil.copyfileobj(r, f)
+    net.fetch_python(url, dest)
 
 
 def _fetch_powershell(url: str, dest: Path) -> None:
-    """Windows only: download with PowerShell (WinINet proxy settings + Windows credentials).
-    URL and target are passed via environment variables - nothing is pasted into the command."""
-    script = ("$ErrorActionPreference='Stop'; $ProgressPreference='SilentlyContinue'; "
-              "[Net.ServicePointManager]::SecurityProtocol=[Net.SecurityProtocolType]::Tls12; "
-              "$p=[Net.WebRequest]::DefaultWebProxy; if ($p) { $p.Credentials=[Net.CredentialCache]::DefaultNetworkCredentials }; "
-              "Invoke-WebRequest -UseBasicParsing -UseDefaultCredentials -Uri $env:ACF_URL -OutFile $env:ACF_OUT")
-    env = dict(os.environ, ACF_URL=url, ACF_OUT=str(dest))
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script],
-                       env=env, capture_output=True, text=True, timeout=300, creationflags=0x08000000)  # no window
-    if r.returncode != 0:
-        msg = re.sub(r"\x1b\[[0-9;]*m", "", (r.stderr or r.stdout)).strip()   # drop colour codes
-        raise RuntimeError(msg.splitlines()[0] if msg else f"PowerShell exit code {r.returncode}")
+    net.fetch_powershell(url, dest)
 
 
 def _check_traineddata(path: Path) -> None:

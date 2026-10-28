@@ -6,13 +6,13 @@ from pathlib import Path
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
-                               QHeaderView, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
+                               QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
                                QPushButton, QSplitter, QStackedWidget, QTableView, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import __version__
 from .. import config as cfg
-from .. import diagnostics, opener
+from .. import diagnostics, opener, remote
 from ..ocr import OcrEngine
 from ..search import SearchIndex
 from ..store import Store
@@ -49,7 +49,11 @@ are handled automatically, as are typos and parts of words (<i>vertrag</i> finds
 <tr><td><b>file:report</b></td><td>only files whose name contains this</td></tr>
 </table>
 <h3>Documents</h3>
-<p>Drag files, folders or ZIP archives into the window. Copies are kept in <code>data/documents</code>,
+<p>Drag files, folders, ZIP archives or links into the window - any file type works (files without
+text can be found by name). Folders that are Git repositories are added as Git sees them (<code>.gitignore</code>
+respected); <code>node_modules</code>, <code>.git</code>, caches etc. are skipped. Public GitHub repositories,
+branches, folders or files: <i>⚙ Menu → Add from link</i> or drag the link from the browser.
+Copies are kept in <code>data/documents</code>,
 the extracted text (JSON) in <code>data/index</code>.</p>
 <p><b>Double-click</b> a hit to open the document as close to the hit as possible.</p>"""
 
@@ -203,6 +207,7 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Add files …", self.add_files_dialog)
         menu.addAction("Add folder …", self.add_folder_dialog)
+        menu.addAction("Add from link / GitHub repository …", self.add_url_dialog)
         menu.addAction("Re-read documents with warnings", self.reindex_problematic)
         menu.addAction("Re-read all documents", lambda: self.reindex(list(self.index.docs.values())))
         menu.addSeparator()
@@ -238,7 +243,7 @@ class MainWindow(QMainWindow):
         self.docs.customContextMenuRequested.connect(self._docs_menu)
         lay.addWidget(self.docs, 1)
         self.docs_empty = QLabel("Drag documents here\n\nPDF · Word · PowerPoint · Excel\nOpenDocument · HTML · CSV · XML\n"
-                                 "Images · e-mails · ZIP …", objectName="muted", alignment=Qt.AlignCenter)
+                                 "Images · e-mails · code · ZIP …\nany other file (by name)\n\nor a link / GitHub repository", objectName="muted", alignment=Qt.AlignCenter)
         lay.addWidget(self.docs_empty, 1)  # takes the free space while the list is hidden, title stays on top
         row = QHBoxLayout()
         b_add = QPushButton("+ Files", objectName="primary")
@@ -307,8 +312,16 @@ class MainWindow(QMainWindow):
         super().resizeEvent(e)
         self.overlay.setGeometry(self.centralWidget().rect().adjusted(16, 16, -16, -16))
 
+    @staticmethod
+    def _web_links(mime) -> list[str]:
+        links = [u.toString() for u in mime.urls() if u.scheme() in ("https", "http")] if mime.hasUrls() else []
+        if not links and mime.hasText():
+            links = [t for t in mime.text().split() if t.lower().startswith(("https://", "http://"))]
+        return links
+
     def dragEnterEvent(self, e):
-        if e.mimeData().hasUrls() and any(u.isLocalFile() for u in e.mimeData().urls()):
+        mime = e.mimeData()
+        if (mime.hasUrls() and any(u.isLocalFile() for u in mime.urls())) or self._web_links(mime):
             e.acceptProposedAction()
             self.overlay.setGeometry(self.centralWidget().rect().adjusted(16, 16, -16, -16))
             self.overlay.show()
@@ -320,9 +333,13 @@ class MainWindow(QMainWindow):
     def dropEvent(self, e):
         self.overlay.hide()
         paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
-        if paths:
+        links = self._web_links(e.mimeData())
+        if paths or links:
             e.acceptProposedAction()
+        if paths:
             self.add_paths(paths)
+        if links:
+            self.add_urls(links)
 
     # ================================================================ Documents
     def add_files_dialog(self):
@@ -334,6 +351,31 @@ class MainWindow(QMainWindow):
         d = QFileDialog.getExistingDirectory(self, "Add folder")
         if d:
             self.add_paths([d])
+
+    def add_url_dialog(self):
+        text, ok = QInputDialog.getText(
+            self, "Add from link",
+            "GitHub repository, folder or file - or a direct link to a file (https://…):\n\n"
+            "  https://github.com/owner/repo\n"
+            "  https://github.com/owner/repo/tree/branch/folder\n"
+            "  https://example.com/report.pdf\n\n"
+            "Several links can be separated by spaces. Only public content can be downloaded.")
+        if ok and text.strip():
+            self.add_urls(text.split())
+
+    def add_urls(self, links: list[str]) -> None:
+        good, bad = [], []
+        for link in links:
+            try:
+                remote.parse(link)
+                good.append(link)
+            except Exception as e:
+                bad.append(f"{link}: {e}")
+        if bad:
+            QMessageBox.warning(self, "Add from link", "These links cannot be used:\n\n" + "\n".join(bad))
+        if good:
+            self.jobs.submit("url", good)
+            self._busy(True)
 
     def add_paths(self, paths: list[str]) -> None:
         paths = [p for p in paths if Path(p).exists()]
@@ -441,6 +483,8 @@ class MainWindow(QMainWindow):
             status = d.get("status", "ok")
             it.setIcon(0, dot_icon(c["ok"] if status == "ok" else c["warn"] if status == "warn" else c["err"]))
             tip = [d.get("display_name", ""), f"Type: {kind}", f"Language: {d.get('language', '?')}"]
+            if d.get("source"):
+                tip.append(f"Source: {d['source']}")
             if d.get("ocr_pages"):
                 tip.append(f"OCR: {d['ocr_pages']} scanned page(s)")
             if d.get("ocr_images"):
@@ -501,8 +545,8 @@ class MainWindow(QMainWindow):
             self.empty_text.setText("")
         elif not self.index.docs:
             self.empty_title.setText("Drop documents here")
-            self.empty_text.setText("Drag files, folders or ZIP archives into this window,\n"
-                                    "then type a search term at the top.")
+            self.empty_text.setText("Drag files, folders, ZIP archives or links (e.g. a GitHub repository)\n"
+                                    "into this window, then type a search term at the top.")
         else:
             self.empty_title.setText("What are you looking for?")
             self.empty_text.setText(f"{len(self.index.docs)} documents ready. Type a search term above (Ctrl+F).\n"

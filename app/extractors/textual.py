@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import csv
 import io
+import json
 import posixpath
 import re
 import zipfile
@@ -428,3 +429,33 @@ def extract_epub(path: Path, ctx: Context) -> Result:
             pairs, _ = html_pairs(decode_bytes(z.read(name)))
             chunks += chunk_lines(pairs, {"kind": "chapter", "chapter": chap})
     return Result(chunks, {"pages": len(order), "language": _lang(chunks)})
+
+
+# ------------------------------------------------------------------ Jupyter notebook
+def extract_ipynb(path: Path, ctx: Context) -> Result:
+    try:
+        nb = json.loads(decode_bytes(_read(path)))
+    except ValueError:
+        return extract_text(path, ctx)   # not valid JSON: index as plain text
+    cells = nb.get("cells")
+    if cells is None:   # nbformat 3
+        cells = [c for ws in nb.get("worksheets", []) for c in ws.get("cells", [])]
+
+    def text_of(value) -> str:
+        return "".join(value) if isinstance(value, list) else str(value or "")
+
+    chunks = []
+    for i, cell in enumerate(cells, 1):
+        kind = cell.get("cell_type", "code")
+        src = text_of(cell.get("source", cell.get("input", "")))
+        if src.strip():
+            chunks.append({"loc": {"kind": "nbcell", "cell": i, "line": 1, "part": kind.capitalize()},
+                           "text": src[:20000]})
+        outputs = []
+        for out in cell.get("outputs", []):
+            outputs.append(text_of(out.get("text") or (out.get("data") or {}).get("text/plain")
+                                   or out.get("evalue") or ""))
+        out_text = "\n".join(o for o in outputs if o.strip())
+        if out_text:
+            chunks.append({"loc": {"kind": "nbcell", "cell": i, "part": "Output"}, "text": out_text[:20000]})
+    return Result(chunks, {"pages": len(cells), "language": _lang(chunks)})

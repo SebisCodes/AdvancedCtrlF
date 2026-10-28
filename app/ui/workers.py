@@ -7,6 +7,7 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
+from .. import remote
 from ..extractors import Context
 from ..search import SearchIndex
 from ..store import Store
@@ -32,7 +33,7 @@ class LoadThread(QThread):
 
 
 class JobThread(QThread):
-    """Processes jobs one after another: ("add", [paths]), ("reindex", [docs]), ("ocr_download", None)."""
+    """Processes jobs one after another: ("add", [paths]), ("url", [links]), ("reindex", [docs]), ("ocr_download", None)."""
     progress = Signal(str, int, int)       # text, done, total
     doc_ready = Signal(object)             # new/updated document
     message = Signal(str)                  # message for the status bar
@@ -89,8 +90,10 @@ class JobThread(QThread):
                         self.ocr.download(lambda m: self.progress.emit(m, done, self.pending))
                         self.message.emit("OCR language data installed")
                         self.ocr_installed.emit()
-                    elif kind == "add":
-                        for doc in self.store.add_path(Path(item), ctx):
+                    elif kind in ("add", "url"):
+                        docs = (self.store.add_path(Path(item), ctx) if kind == "add"
+                                else remote.fetch(item, self.store, ctx))
+                        for doc in docs:
                             if doc.get("duplicate"):
                                 stats["duplicate"] += 1
                             elif doc.get("status") == "error":
