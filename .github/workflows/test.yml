@@ -17,7 +17,8 @@ jobs:
     timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
-      PY: ${{ runner.os == 'Windows' && 'python\python\python.exe' || 'python/python/bin/python3' }}
+      # (runner.* is not available at job level, so the matrix value is used)
+      PY: ${{ matrix.os == 'windows-latest' && 'python/python/python.exe' || 'python/python/bin/python3' }}
     defaults:
       run:
         shell: bash
