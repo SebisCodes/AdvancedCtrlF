@@ -163,7 +163,6 @@ data/index/            one JSON per document: text passages with their location
 data/tessdata/         OCR language packs (managed via Menu → Languages and packs)
 data/models/meaning/   model for search by meaning (optional, managed there as well)
 python/                local Python
-website/               the web page advanced-ctrl-f.giit.ch (not part of the download, see website/README.md)
 ```
 
 The JSON files in `data/index/` are plain and documented by example – each passage looks like
