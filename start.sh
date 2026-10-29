@@ -85,7 +85,7 @@ fetch() {  # fetch URL [target file]
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1"; else shasum -a 256 "$1"; fi | cut -d' ' -f1; }
 
 download_python() {
-    local arch triple json urls url name sums expected actual tag dl
+    local arch triple json urls url name sums expected actual tag base dl
     case "$(uname -m)" in
         x86_64|amd64) arch="x86_64" ;;
         aarch64|arm64) arch="aarch64" ;;
@@ -96,11 +96,20 @@ download_python() {
         *)      triple="${arch}-unknown-linux-gnu" ;;
     esac
     say "Looking up the latest Python version ..."
-    json="$(fetch "$RELEASE_API")" || return 1
-    tag="$(printf '%s' "$json" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+    sums=""
+    if json="$(fetch "$RELEASE_API")"; then
+        tag="$(printf '%s' "$json" | grep -o '"tag_name": *"[^"]*"' | head -1 | sed 's/.*"\([^"]*\)"$/\1/')"
+        base="https://github.com/astral-sh/python-build-standalone/releases/download/${tag}"
+        urls="$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https:[^"]*\)"$/\1/')"
+    else
+        # GitHub API unavailable (e.g. 403 rate limit): the latest release's checksum list names all files
+        say "GitHub API not available - reading the file list of the latest release instead."
+        base="https://github.com/astral-sh/python-build-standalone/releases/latest/download"
+        sums="$(fetch "$base/SHA256SUMS")" || return 1
+        urls="$(printf '%s\n' "$sums" | awk '{print $2}' | sed "s#+#%2B#; s#^#$base/#")"
+    fi
     # Asset URLs encode "+" as "%2B"; skip pre-releases (a/b/rc) and free-threaded builds
-    urls="$(printf '%s' "$json" | grep -o '"browser_download_url": *"[^"]*"' | sed 's/.*"\(https:[^"]*\)"$/\1/' \
-            | grep -E "/cpython-[0-9]+\.[0-9]+\.[0-9]+(\+|%2B)[0-9]+-${triple}-install_only\.tar\.gz$" || true)"
+    urls="$(printf '%s\n' "$urls" | grep -E "/cpython-[0-9]+\.[0-9]+\.[0-9]+(\+|%2B)[0-9]+-${triple}-install_only\.tar\.gz$" || true)"
     if [ -n "$PY_VERSION" ]; then
         urls="$(printf '%s\n' "$urls" | grep -E "/cpython-${PY_VERSION//./\\.}(\.|\+|%2B)" || true)"
     fi
@@ -112,7 +121,7 @@ download_python() {
     dl="$PY_DIR/_download"
     rm -rf "$dl" && mkdir -p "$dl"
     fetch "$url" "$dl/python.tar.gz" || return 1
-    sums="$(fetch "https://github.com/astral-sh/python-build-standalone/releases/download/${tag}/SHA256SUMS")" || return 1
+    [ -n "$sums" ] || sums="$(fetch "$base/SHA256SUMS")" || return 1
     expected="$(printf '%s\n' "$sums" | grep -F "  $name" | head -1 | cut -d' ' -f1)"
     actual="$(sha256 "$dl/python.tar.gz")"
     [ -n "$expected" ] || { rm -rf "$dl"; fail "No checksum found for $name - aborting."; }

@@ -58,14 +58,6 @@ def _system_tessdata() -> list[Path]:
 MIRROR = "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{lang}.traineddata"
 
 
-def _fetch_python(url: str, dest: Path) -> None:
-    net.fetch_python(url, dest)
-
-
-def _fetch_powershell(url: str, dest: Path) -> None:
-    net.fetch_powershell(url, dest)
-
-
 def _check_traineddata(path: Path, min_size: int = 100_000) -> None:
     size = path.stat().st_size
     with open(path, "rb") as f:
@@ -142,14 +134,14 @@ class OcrEngine:
 
     def download(self, codes=langmod.DEFAULT_PACKS, progress=lambda msg: None) -> None:
         """Install language packs. A pack found in a local Tesseract installation is copied;
-        otherwise it is downloaded - trying Python (urllib), then on Windows PowerShell (Windows
-        network stack incl. company proxies with Windows authentication), then a CDN mirror if
-        github.com is blocked."""
+        otherwise it is downloaded - trying Python (urllib), then PowerShell on Windows (Windows
+        network stack incl. company proxies with Windows authentication) or curl on macOS/Linux
+        (system certificate store), then a CDN mirror if github.com is blocked."""
         self.own_dir.mkdir(parents=True, exist_ok=True)
         for stale in self.own_dir.glob("*.part"):   # leftovers of interrupted downloads
             _remove(stale)
         urls = [u for u in dict.fromkeys([self.url_template, MIRROR]) if u]
-        methods = [("Python", _fetch_python)] + ([("PowerShell", _fetch_powershell)] if os.name == "nt" else [])
+        methods = net.methods()
         system = self.system_packs()
         for n, l in enumerate(codes, 1):
             target = self.own_dir / f"{l}.traineddata"

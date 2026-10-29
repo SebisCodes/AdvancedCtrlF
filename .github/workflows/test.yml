@@ -17,8 +17,6 @@ jobs:
     timeout-minutes: 40
     env:
       QT_QPA_PLATFORM: offscreen
-      # (runner.* is not available at job level, so the matrix value is used)
-      PY: ${{ matrix.os == 'windows-latest' && 'python/python/python.exe' || 'python/python/bin/python3' }}
     defaults:
       run:
         shell: bash
@@ -40,8 +38,21 @@ jobs:
         shell: cmd
         run: start.cmd setup
 
+      - name: Interpreter chosen by the launcher
+        run: |
+          # same order as the launchers; python/venv is the system-Python fallback
+          for c in python/python/python.exe python/bin/python3 python/python/bin/python3 python/venv/bin/python3; do
+            if [ -x "$c" ]; then echo "PY=$c" >> "$GITHUB_ENV"; echo "$c"; exit 0; fi
+          done
+          echo "::error::no interpreter found under python/"; exit 1
+
       - name: Install OCR language packs (app code; English, German, French)
-        run: $PY -I -c "import sys; sys.path.insert(0, '.'); from app.ocr import OcrEngine; from app import config as c; OcrEngine(c.TESSDATA_DIR, 300, c.DEFAULTS['tessdata_url']).download(['eng', 'deu', 'fra'], print)"
+        run: |
+          $PY -I -c "import sys; sys.path.insert(0, '.'); from app.ocr import OcrEngine; from app import config as c; OcrEngine(c.TESSDATA_DIR, 300, c.DEFAULTS['tessdata_url']).download(['eng', 'deu', 'fra'], print)" 2> ocr-error.txt || {
+            cat ocr-error.txt
+            echo "::error title=OCR download (${{ runner.os }})::$(tail -n 20 ocr-error.txt | tr -d '\r' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')"
+            exit 1
+          }
 
       - name: Unit tests
         run: $PY -I -W ignore tests/test_all.py

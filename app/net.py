@@ -1,13 +1,16 @@
 """HTTPS downloads shared by OCR data, GitHub repositories and file links.
 
 Tries Python (urllib) first and, on Windows, falls back to PowerShell, which uses the
-Windows network stack incl. company proxies that require Windows authentication.
+Windows network stack incl. company proxies that require Windows authentication. On macOS
+and Linux the fallback is curl, which uses the system certificate store - a Python without
+its own certificates (e.g. python.org builds on macOS) fails with CERTIFICATE_VERIFY_FAILED.
 """
 from __future__ import annotations
 
 import logging
 import os
 import re
+import shutil
 import subprocess
 import time
 import urllib.parse
@@ -86,11 +89,30 @@ def fetch_powershell(url: str, dest: Path, progress=None, cancelled=None, max_by
         raise DownloadError(f"download larger than {max_bytes // 1024 ** 2} MB")
 
 
+def fetch_curl(url: str, dest: Path, progress=None, cancelled=None, max_bytes: int = MAX_DOWNLOAD) -> None:
+    """macOS/Linux: download with curl (system certificate store, proxy environment variables)."""
+    _check_url(url)
+    if progress:
+        progress("downloading via curl …")
+    r = subprocess.run(["curl", "-fsSL", "--proto", "=https", "--proto-redir", "=https", "--retry", "2",
+                        "--max-filesize", str(max_bytes), "-A", "AdvancedCtrlF", "-o", str(dest), url],
+                       capture_output=True, text=True, timeout=3600)
+    if r.returncode != 0:
+        msg = r.stderr.strip()
+        raise DownloadError(msg.splitlines()[-1] if msg else f"curl exit code {r.returncode}")
+
+
+def methods() -> list:
+    """Download methods to try, in order."""
+    if os.name == "nt":
+        return [("Python", fetch_python), ("PowerShell", fetch_powershell)]
+    return [("Python", fetch_python)] + ([("curl", fetch_curl)] if shutil.which("curl") else [])
+
+
 def download(url: str, dest: Path, progress=None, cancelled=None, max_bytes: int = MAX_DOWNLOAD) -> str:
     """Download with all available methods. Returns the file name to use for the download."""
-    methods = [("Python", fetch_python)] + ([("PowerShell", fetch_powershell)] if os.name == "nt" else [])
     errors = []
-    for name, fetch in methods:
+    for name, fetch in methods():
         try:
             disposition = fetch(url, dest, progress, cancelled, max_bytes)
             log.info("Downloaded %s via %s (%d bytes)", url, name, dest.stat().st_size)

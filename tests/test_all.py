@@ -2,6 +2,7 @@
 
 Run:  python -I tests/test_all.py   (or: python -m unittest discover tests)
 """
+import os
 import shutil
 import sys
 import tempfile
@@ -265,6 +266,24 @@ class AnyFileAndRepositoryTests(Base):
         self.assertEqual(parse("https://example.org/a.pdf")["kind"], "file")
         with self.assertRaises(ExtractError):
             parse("http://example.org/a.pdf")
+
+    def test_download_fallback(self):
+        from app import net
+        names = [n for n, _ in net.methods()]
+        self.assertEqual(names[0], "Python")
+        self.assertIn("PowerShell" if os.name == "nt" else "curl", names)   # curl: system certificate store
+        saved = net.methods
+        try:   # a failing first method (e.g. CERTIFICATE_VERIFY_FAILED) falls through to the next
+            def broken(*a): raise OSError("certificate verify failed")
+            def ok(url, dest, *a): dest.write_bytes(b"data")
+            net.methods = lambda: [("Python", broken), ("curl", ok)]
+            dest = self.tmp / "dl.bin"
+            self.assertEqual(net.download("https://example.org/a.bin", dest), "a.bin")
+            self.assertEqual(dest.read_bytes(), b"data")
+        finally:
+            net.methods = saved
+        with self.assertRaises(net.DownloadError):
+            net.fetch_curl("http://example.org/a.bin", self.tmp / "x")
 
 
 class LanguageTests(Base):
