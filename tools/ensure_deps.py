@@ -20,7 +20,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 REQ = ROOT / "requirements.txt"
-CHECK_IMPORTS = ("PySide6.QtWidgets", "pymupdf", "openpyxl", "xlrd")
+CHECK_IMPORTS = ("PySide6.QtWidgets", "pymupdf", "openpyxl", "xlrd", "snowballstemmer", "numpy")
 PY = sys.executable
 LOG: Path | None = None
 

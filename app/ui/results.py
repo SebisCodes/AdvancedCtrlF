@@ -7,7 +7,7 @@ from PySide6.QtCore import QAbstractTableModel, QModelIndex, QRectF, QSize, Qt
 from PySide6.QtGui import QAbstractTextDocumentLayout, QColor, QPainter, QPalette, QTextDocument
 from PySide6.QtWidgets import QStyle, QStyledItemDelegate, QStyleOptionViewItem
 
-from ..search import Hit, SearchIndex, format_location, target_of
+from ..search import MEANING_FLOOR, Hit, SearchIndex, format_location, target_of
 
 COLS = ("Relevance", "Document", "Location", "Text")
 
@@ -77,7 +77,12 @@ class ResultsModel(QAbstractTableModel):
             if col == 1:
                 return f"{doc.get('display_name')}\nType: {doc.get('kind')}"
             if col == 0:
-                return f"Relevance {hit.relevance} % · matches {round(hit.coverage * 100)} % of the search words"
+                tip = f"Relevance {hit.relevance} % · matches {round(hit.coverage * 100)} % of the search words"
+                if hit.meaning >= MEANING_FLOOR:
+                    tip += f"\nSimilar in meaning: {round(hit.meaning * 100)} %"
+                    if not hit.coverage:
+                        tip += " - found by meaning, without the search words"
+                return tip
         return None
 
 

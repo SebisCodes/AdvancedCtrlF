@@ -94,7 +94,7 @@ class Preview(QWidget):
         parts = []
         for ci in range(max(0, hit.chunk - 1), min(len(chunks), hit.chunk + 2)):
             ch = chunks[ci]
-            spans = ix.highlights(ch["text"], hit.match_terms)
+            spans = ix.highlights(ch["text"], hit.match_terms, hit.lang)
             parts.append(self._chunk_html(ch["text"], spans, ci == hit.chunk, ci == hit.chunk))
         self.text.setHtml(f'<div style="font-size:11pt;line-height:140%;">{"".join(parts)}</div>')
         self.text.scrollToAnchor("hit")
@@ -103,7 +103,7 @@ class Preview(QWidget):
         can_render = kind in RENDERABLE and (target.get("page") or target.get("kind") == "image")
         self.tabs.setTabEnabled(1, bool(can_render))
         if can_render:
-            words = {ch[s:e] for ch in [chunks[hit.chunk]["text"]] for s, e in ix.highlights(ch, hit.match_terms)}
+            words = {ch[s:e] for ch in [chunks[hit.chunk]["text"]] for s, e in ix.highlights(ch, hit.match_terms, hit.lang)}
             self._render_page(stored_path, int(target.get("page") or 1), words)
         elif self.tabs.currentIndex() == 1:
             self.tabs.setCurrentIndex(0)

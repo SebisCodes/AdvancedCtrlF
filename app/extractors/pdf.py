@@ -116,7 +116,7 @@ def extract_pdf(path: Path, ctx: Context) -> Result:
             "ocr_skipped": images.skipped + (skipped_ocr if cfg.get("ocr_enabled") else 0)}
     if skipped_ocr:
         meta["warning"] = (f"{skipped_ocr} scanned page(s) not read: " +
-                           ("OCR language data missing - ⚙ Menu → OCR language packs" if cfg.get("ocr_enabled") else "OCR is switched off in the menu"))
+                           ("OCR language data missing - ⚙ Menu → Languages and packs" if cfg.get("ocr_enabled") else "OCR is switched off in the menu"))
     meta["language"] = langmod.detect("\n".join(sample))[0]
     return Result(ch.result(), meta)
 
@@ -126,7 +126,7 @@ def extract_image(path: Path, ctx: Context) -> Result:
     if not ctx.config.get("ocr_enabled"):
         return Result([], {"warning": "Image not read: OCR is switched off in the menu"})
     if ctx.ocr is None or not ctx.ocr.available():
-        return Result([], {"warning": "Image not read: OCR language data missing - ⚙ Menu → OCR language packs", "ocr_skipped": 1})
+        return Result([], {"warning": "Image not read: OCR language data missing - ⚙ Menu → Languages and packs", "ocr_skipped": 1})
     ch = Chunker()
     tracker = LanguageTracker(ctx.ocr)
     texts = []

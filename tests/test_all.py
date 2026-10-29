@@ -302,6 +302,22 @@ class LanguageTests(Base):
         "ja": "契約はいずれの当事者も三か月前の通知により解約することができます。",
         "ko": "계약은 어느 당사자든 3개월 전에 통지하여 해지할 수 있습니다.",
         "zh": "任何一方均可提前三个月通知终止合同，这个问题我们会说明。",
+        "ca": "El contracte es pot rescindir per qualsevol de les parts amb un preavís de tres mesos i els diners.",
+        "sv": "Avtalet kan sägas upp av båda parter och det är inte möjligt att göra det utan att meddela.",
+        "no": "Avtalen kan sies opp av begge parter, og det ble ikke gjort noe etter at hun skal flytte.",
+        "da": "Aftalen kan opsiges af begge parter, og det blev ikke gjort noget efter at hun havde flyttet.",
+        "tr": "Sözleşme taraflardan biri tarafından üç ay önceden bildirimle feshedilebilir ve bu çok önemli.",
+        "id": "Kontrak ini dapat diakhiri oleh salah satu pihak dengan pemberitahuan tiga bulan sebelumnya.",
+        "he": "כל אחד מהצדדים רשאי לסיים את החוזה בהודעה מוקדמת של שלושה חודשים.",
+        "hi": "कोई भी पक्ष तीन महीने की सूचना देकर अनुबंध समाप्त कर सकता है और यह नियम है।",
+        "mr": "कोणताही पक्ष तीन महिन्यांची सूचना देऊन करार संपवू शकतो आणि हे नियम आहे.",
+        "bn": "যেকোনো পক্ষ তিন মাসের নোটিশ দিয়ে চুক্তি বাতিল করতে পারে।",
+        "pa": "ਕੋਈ ਵੀ ਧਿਰ ਤਿੰਨ ਮਹੀਨਿਆਂ ਦੇ ਨੋਟਿਸ ਨਾਲ ਇਕਰਾਰਨਾਮਾ ਖਤਮ ਕਰ ਸਕਦੀ ਹੈ।",
+        "gu": "કોઈપણ પક્ષ ત્રણ મહિનાની નોટિસ આપીને કરાર સમાપ્ત કરી શકે છે.",
+        "ta": "எந்த தரப்பினரும் மூன்று மாத அறிவிப்புடன் ஒப்பந்தத்தை முடிக்கலாம்.",
+        "te": "ఏ పక్షమైనా మూడు నెలల నోటీసుతో ఒప్పందాన్ని రద్దు చేయవచ్చు.",
+        "ml": "ഏത് കക്ഷിക്കും മൂന്ന് മാസത്തെ നോട്ടീസ് നൽകി കരാർ അവസാനിപ്പിക്കാം.",
+        "zh-Hant": "任何一方均可提前三個月通知終止合同，這個問題我們會說明。",
     }
 
     def test_detection(self):
@@ -348,6 +364,137 @@ class LanguageTests(Base):
         res = extract(f, self.ctx)
         self.assertEqual(res.meta["language"], "fr")
         self.assertIn("dépôt sera remboursé", " ".join(c["text"] for c in res.chunks))
+
+
+class LanguageSearchTests(Base):
+    """Word forms per language, scripts without spaces and search by meaning."""
+
+    @staticmethod
+    def index(texts, model=None):
+        from app.search import SearchIndex
+        ix = SearchIndex(model)
+        for i, t in enumerate(texts):
+            ix.add({"id": f"d{i}", "name": f"d{i}.txt", "kind": "txt", "chunks": [{"text": t, "loc": {}}]})
+        return ix
+
+    def top(self, ix, query, **kw):
+        hits, _ = ix.search(query, **kw)
+        return hits[0].doc_id if hits else None
+
+    def test_word_forms_per_language(self):
+        ix = self.index(["The tenants were running a small bakery in the old town since many years.",
+                         "Les contrats de location sont signés par les deux parties chaque année en mai.",
+                         "Договора аренды подписываются обеими сторонами каждый год в мае месяце.",
+                         "Die Mietverträge werden jedes Jahr im Mai von beiden Parteien unterschrieben."])
+        self.assertEqual(ix.docs["d1"]["lang"], "fr")
+        self.assertEqual(self.top(ix, "runs bakeries "), "d0")
+        self.assertEqual(self.top(ix, "contrat "), "d1")
+        self.assertEqual(self.top(ix, "договор "), "d2")
+        self.assertEqual(self.top(ix, "Mietvertrag "), "d3")
+
+    def test_word_forms_can_be_switched_off(self):
+        from app import search
+        try:
+            search.set_stemming_off(["fr"])
+            ix = self.index(["Les contrats de location sont signés par les deux parties chaque année en mai."])
+            hits, _ = ix.search("contrat ")
+            self.assertTrue(all(h.coverage < 1 or "contrat" not in h.match_terms for h in hits) or not hits
+                            or "contrats" in {t for t in hits[0].match_terms})
+        finally:
+            search.set_stemming_off([])
+
+    def test_scripts_without_spaces_and_vowel_signs(self):
+        ix = self.index(["西藏昨晚发生强烈地震，当局正在评估损失情况并派出救援队伍。",
+                         "東京では明日から新しい交通規則が始まり、多くの人が注目しています。",
+                         "सरकार ने आज नई शिक्षा नीति की घोषणा की और सभी राज्यों को सूचना दी।",
+                         "서울에서 새로운 교통 규칙이 내일부터 시행됩니다."])
+        self.assertEqual(self.top(ix, "地震 "), "d0")
+        self.assertEqual(self.top(ix, "交通規則 "), "d1")
+        self.assertEqual(self.top(ix, "नीति "), "d2")
+        self.assertEqual(self.top(ix, "교통 "), "d3")
+        from app.search import tokenize
+        self.assertEqual(tokenize("नीति"), ["नीति"])          # vowel signs stay part of the word
+
+    def test_search_by_meaning(self):
+        import numpy as np
+
+        class ConceptModel:
+            """Words of one concept share a vector; enough to test ranking and fusion."""
+            CONCEPTS = [{"car", "automobile", "vehicle", "garage"}, {"cake", "baking", "recipe", "flour"},
+                        {"notice", "terminate", "contract", "cancel"}]
+
+            def embed(self, text):
+                v = np.zeros(4, np.float32)
+                for w in text.lower().split():
+                    w = w.strip(".,")
+                    hit = [i for i, c in enumerate(self.CONCEPTS) if w in c]
+                    v[hit[0] if hit else 3] += 1.0 if hit else 0.2
+                n = np.linalg.norm(v)
+                return v / n if n else None
+
+            def embed_windows(self, text):
+                v = self.embed(text)
+                return [v] if v is not None else []
+
+        docs = ["Bring the automobile to the garage for a check.",
+                "A recipe with flour and baking soda.",
+                "You may terminate the contract with three months notice.",
+                "Weather report for the weekend."]
+        ix = self.index(docs, ConceptModel())
+        self.assertTrue(ix.meaning_ready)
+        hits, _ = ix.search("vehicle ")                       # no shared word
+        self.assertEqual(hits[0].doc_id, "d0")
+        self.assertEqual(hits[0].coverage, 0.0)
+        self.assertGreater(hits[0].meaning, 0.7)
+        snip, spans, _ = ix.snippet(hits[0])
+        self.assertTrue(spans)                                # words close in meaning are marked
+        self.assertEqual(self.top(ix, "weather "), "d3")      # exact words still win
+        self.assertEqual(self.top(ix, "cancel "), "d2")
+        hits, _ = ix.search("vehicle ", meaning=False)
+        self.assertEqual(hits, [])
+        ix.attach_model(None)
+        self.assertFalse(ix.meaning_ready)
+
+    def test_search_in_folder(self):
+        from app.search import SearchIndex, folder_of
+        ix = SearchIndex()
+        names = ["Law/2024/lease.txt", "Law/2023/lease.txt", "School/notes.txt", "acme/shop › docs/lease.md", "top.txt"]
+        for i, n in enumerate(names):
+            ix.add({"id": f"d{i}", "name": n.rsplit("/", 1)[-1], "display_name": n, "kind": "txt",
+                    "chunks": [{"text": "The lease ends in May.", "loc": {}}]})
+        self.assertEqual(folder_of(ix.docs["d3"]), ("acme", "shop", "docs"))
+        self.assertEqual(ix.folders()[("Law",)], 2)
+        ids = lambda hits: sorted(h.doc_id for h in hits)
+        self.assertEqual(ids(ix.search("lease ", folder=("Law",))[0]), ["d0", "d1"])
+        self.assertEqual(ids(ix.search("lease ", folder=("Law", "2024"))[0]), ["d0"])
+        self.assertEqual(ids(ix.search("lease folder:school")[0]), ["d2"])
+        self.assertEqual(ids(ix.search("lease ordner:shop")[0]), ["d3"])
+        self.assertEqual(len(ix.search("lease ")[0]), 5)
+
+    def test_meaning_pack_conversion(self):
+        import json as _json
+        import struct
+        import numpy as np
+        from app import semantic
+        pieces = [["[PAD]", 0.0], ["[UNK]", 0.0], ["\u2581car", -2.0], ["\u2581ca", -3.0], ["r", -3.0],
+                  ["\u2581auto", -2.5], ["mobile", -2.5]]
+        raw = self.tmp / "pack"
+        raw.mkdir()
+        (raw / "tokenizer.json").write_text(_json.dumps({"model": {"type": "Unigram", "unk_id": 1, "vocab": pieces}}))
+        mat = np.arange(len(pieces) * 4, dtype=np.float32).reshape(len(pieces), 4) - 6
+        header = _json.dumps({"embeddings": {"dtype": "F32", "shape": list(mat.shape),
+                                             "data_offsets": [0, mat.nbytes]}}).encode()
+        (raw / "model.safetensors").write_bytes(struct.pack("<Q", len(header)) + header + mat.tobytes())
+        out = self.tmp / "meaning"
+        out.mkdir()
+        semantic.convert(raw / "tokenizer.json", raw / "model.safetensors", out)
+        self.assertTrue(semantic.installed(out))
+        m = semantic.load(out)
+        self.assertEqual(m.pieces("car automobile"), [2, 5, 6])   # best split, not "ca"+"r"
+        v = m.embed("car")
+        expect = mat[2] / np.linalg.norm(mat[2])
+        self.assertLess(float(np.abs(v - expect).max()), 0.02)    # int8 storage stays close
+        self.assertEqual(m.pieces("xyz"), [])                     # unknown characters are skipped
 
 
 class StoreAndSearchTests(Base):

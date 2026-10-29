@@ -7,7 +7,8 @@ from pathlib import Path
 
 from PySide6.QtCore import QThread, Signal
 
-from .. import remote
+from .. import config as cfg
+from .. import remote, semantic
 from ..extractors import Context
 from ..search import SearchIndex
 from ..store import Store
@@ -32,13 +33,44 @@ class LoadThread(QThread):
         self.loaded.emit(ix)
 
 
+class MeaningThread(QThread):
+    """Loads the meaning model and computes the vectors of all chunks of an index."""
+    progress = Signal(int, int)            # chunks done, total
+    ready = Signal(object, object)         # model, {chunk id: vectors}
+    failed = Signal(str)
+
+    def __init__(self, index: SearchIndex, folder: Path) -> None:
+        super().__init__()
+        self.index, self.folder = index, folder
+        self._stop = False
+
+    def stop(self) -> None:
+        self._stop = True
+
+    def run(self) -> None:
+        try:
+            model = semantic.load(self.folder)
+            if model is None:
+                self.failed.emit("the meaning model could not be loaded")
+                return
+            vecs = self.index.compute_vectors(model, lambda d, t: self.progress.emit(d, t), lambda: self._stop)
+            if not self._stop:
+                self.ready.emit(model, vecs)
+        except Exception as e:
+            log.exception("Meaning vectors failed")
+            self.failed.emit(str(e))
+
+
 class JobThread(QThread):
-    """Processes jobs one after another: ("add", [paths]), ("url", [links]), ("reindex", [docs]), ("ocr_download", None)."""
+    """Processes jobs one after another: ("add", [paths]), ("url", [links]), ("reindex", [docs]),
+    ("ocr_download", [codes]), ("meaning_download", None)."""
     progress = Signal(str, int, int)       # text, done, total
     doc_ready = Signal(object)             # new/updated document
     message = Signal(str)                  # message for the status bar
     ocr_installed = Signal()               # OCR language data was downloaded successfully
     ocr_failed = Signal(str)               # OCR language data download failed (reason)
+    meaning_installed = Signal()           # the meaning model was downloaded and converted
+    meaning_failed = Signal(str)
     idle = Signal(str, int)                     # queue empty: summary text, number of failures
 
     def __init__(self, store: Store, config: dict, ocr) -> None:
@@ -83,6 +115,8 @@ class JobThread(QThread):
                     break
                 if kind == "ocr_download":
                     label = "OCR language packs"
+                elif kind == "meaning_download":
+                    label = "Meaning model"
                 elif isinstance(item, (str, Path)):
                     label = Path(item).name if kind == "add" else str(item)
                 else:
@@ -95,6 +129,12 @@ class JobThread(QThread):
                         self.ocr.download(item, lambda m: self.progress.emit(m, done, self.pending))
                         self.message.emit("OCR language packs installed")
                         self.ocr_installed.emit()
+                    elif kind == "meaning_download":
+                        semantic.install(cfg.MEANING_DIR, self.config.get("meaning_url") or semantic.DEFAULT_URL,
+                                         lambda m: self.progress.emit(m, done, self.pending),
+                                         lambda: self._cancel or self._stop)
+                        self.message.emit("Meaning model installed")
+                        self.meaning_installed.emit()
                     elif kind in ("add", "url"):
                         docs = (self.store.add_path(Path(item), ctx) if kind == "add"
                                 else remote.fetch(item, self.store, ctx))
@@ -113,6 +153,8 @@ class JobThread(QThread):
                     log.exception("Job %s failed", kind)
                     if kind == "ocr_download":
                         self.ocr_failed.emit(str(e))
+                    elif kind == "meaning_download":
+                        self.meaning_failed.emit(str(e))
                     stats["failed"] += 1
                     self.message.emit(f"Error with {label}: {e}")
                 done += 1

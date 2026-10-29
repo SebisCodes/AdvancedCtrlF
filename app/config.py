@@ -4,7 +4,8 @@ All data lives next to the program (portable):
     config/config.json   settings
     data/documents/      copies of the added documents
     data/index/          one JSON per document (text + locations)
-    data/tessdata/       OCR language data (deu/eng)
+    data/tessdata/       OCR language packs
+    data/models/meaning/ model for search by meaning (optional download)
 """
 from __future__ import annotations
 
@@ -20,6 +21,7 @@ DATA_DIR = ROOT / "data"
 DOCS_DIR = DATA_DIR / "documents"
 INDEX_DIR = DATA_DIR / "index"
 TESSDATA_DIR = DATA_DIR / "tessdata"
+MEANING_DIR = DATA_DIR / "models" / "meaning"
 LOG_FILE = DATA_DIR / "advanced_ctrl_f.log"
 
 DEFAULTS: dict = {
@@ -30,6 +32,9 @@ DEFAULTS: dict = {
     "ocr_download_declined": False,
     "ocr_first_start_asked": False,  # the download question is asked once on the first start
     "tessdata_url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata",
+    "meaning_enabled": True,      # search by meaning when the model is installed
+    "meaning_url": "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/{file}",
+    "stemming_off": [],           # languages (ISO codes) whose words are not reduced to their stem
     "max_file_mb": 500,
     "max_results": 300,
     "one_hit_per_doc": False,

@@ -281,7 +281,7 @@ class Store:
                 doc["message"] = res.meta["note"]
             elif doc["needs_ocr"]:
                 doc["status"], doc["message"] = "warn", (f"{res.meta['ocr_skipped']} image(s) not read: "
-                                                         "OCR language data missing - ⚙ Menu → OCR language packs")
+                                                         "OCR language data missing - ⚙ Menu → Languages and packs")
             elif not res.chunks:
                 doc["status"], doc["message"] = "warn", "No text found"
         except ExtractError as e:

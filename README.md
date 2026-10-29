@@ -16,7 +16,7 @@ best matching passages ranked in a table – with page / slide / line / cell, a 
 | macOS   | `start.command` (double-click in Finder) | first time: right-click → *Open* → *Open* (unsigned script) |
 | Linux   | `./start.sh`  | `./start.sh --setup` only prepares Python/packages |
 
-The first start prepares Python and installs the required packages (a few minutes, ~200 MB). Later starts are instant.
+The first start prepares Python and installs the required packages (a few minutes, ~260 MB). Later starts are instant.
 
 ### How the launcher finds Python
 
@@ -77,20 +77,36 @@ are recognised as a whole. Tiny images such as icons are skipped and a picture t
 (like a logo on every slide) is read and listed only once.
 
 **OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only **language packs** are
-needed. *Menu → OCR language packs* lists 33 languages (English, German, French, Spanish, Italian, Portuguese, Dutch,
-Polish, Czech, Slovak, Swedish, Danish, Norwegian, Finnish, Turkish, Romanian, Hungarian, Croatian, Indonesian,
-Vietnamese, Russian, Ukrainian, Bulgarian, Greek, Arabic, Persian, Hebrew, Hindi, Thai, Japanese, Korean, Chinese
-simplified/traditional) – tick the ones you need, untick to delete them. On the **first start** this dialog opens with
-English, German and the system language preselected. Packs from an existing Tesseract installation are copied
-instead of downloaded.
+needed. *Menu → Languages and packs* lists 49 languages – Latin script (English, German, French, Spanish, Italian,
+Portuguese, Catalan, Dutch, Afrikaans, Polish, Czech, Slovak, Slovenian, Croatian, Swedish, Danish, Norwegian,
+Finnish, Estonian, Latvian, Lithuanian, Hungarian, Romanian, Turkish, Indonesian, Vietnamese), Russian, Ukrainian,
+Bulgarian, Greek, Arabic, Persian, Urdu, Hebrew, Hindi, Marathi, Nepali, Bengali, Punjabi, Gujarati, Odia, Tamil,
+Telugu, Kannada, Malayalam, Sinhala, Thai, Japanese, Korean and Chinese simplified/traditional. Tick the ones you
+need, untick to delete them. On the **first start** this dialog opens with English, German and the system language
+preselected. Packs from an existing Tesseract installation are copied instead of downloaded.
 
-The **document language is detected automatically** (writing system plus common words, 33 languages): the first OCR
-pages are read with up to 4 installed packs, then only with the detected language – more accurate and faster.
+The **language of every document is detected automatically**: first the writing system, then – for scripts that
+several languages share – common short words and typical letters, weighted by how specific they are to a language.
+The first OCR pages are read with up to 4 installed packs, then only with the detected language – more accurate and
+faster.
 
 ## Searching
 
-Case, umlauts (*Größe = Groesse = Grosse*), word forms (*contract / contracts*, *Vertrag / Verträge*), typos
-(*warrenty*) and parts of compound words (*vertrag* finds *Arbeitsvertrag*) are handled automatically.
+Case, accents and umlauts (*Größe = Groesse = Grosse*), **word forms in the language of each document**
+(*contract / contracts*, *Vertrag / Verträge*, *contrat / contrats*, *договор / договора* – Snowball stemmers for
+30 languages, switchable per language in *Menu → Languages and packs*), typos (*warrenty*) and parts of compound
+words (*vertrag* finds *Arbeitsvertrag*) are handled automatically. Chinese, Japanese, Korean and Thai, which are
+written without spaces between words, are indexed as overlapping pairs of characters, so any word inside a sentence
+is found.
+
+**Search by meaning** (optional, *Menu → Languages and packs → Install*, about 530 MB download, 140 MB on disk) finds
+passages that mean the same as the search words even if they use other words – *notice period* also finds
+*terminate the contract with three months' notice*, *car* also finds *Fahrzeug*. Every passage gets vectors from a
+multilingual model with fixed vectors per word piece (Model2Vec *potion-multilingual-128M*, MIT licence, 100+
+languages); no neural network runs while searching and nothing leaves the computer. The more of the search words a
+passage contains, the more the normal word search decides the order; if no passage contains all of them, the
+meaning counts more. Hits found by meaning alone have the closest words in their best sentence highlighted, and the
+tooltip of the relevance bar shows the similarity.
 
 Ranking uses BM25 per passage plus boosts for: all search words present, words close to each other, words in the
 same order as typed, and exact phrases.
@@ -102,6 +118,12 @@ same order as typed, and exact phrases.
 | `warrant*`        | word prefix                              |
 | `type:pdf,docx`   | only these file types                    |
 | `file:report`     | only files whose name contains "report"  |
+| `folder:contracts`| only documents in a folder whose path contains "contracts" |
+
+**Search in one folder:** the document list on the left shows the added documents as a folder tree (also folders
+inside ZIP archives and repositories). **Click a folder** and only that folder and its subfolders are searched; the
+list *All folders* next to the search field shows the current choice and switches back to everything. Right-click a
+folder to re-read or remove it as a whole.
 
 **Double-click** a hit to open the document at the hit: PDFs on the right page (SumatraPDF, Acrobat, Okular,
 Evince, zathura, … or a browser), web pages in the browser scrolled to the hit, text files at the right line
@@ -122,7 +144,7 @@ PDF and image pages with the hits highlighted.
   installation (pip output) and the exact error if the start fails.
 - `start.cmd debug` keeps the console window open on Windows.
 - **Yellow dot "…not read: OCR language data missing"** – the OCR data was not downloaded (declined or blocked by a
-  proxy/firewall). Use *Menu → OCR language packs*; affected documents are re-read automatically afterwards.
+  proxy/firewall). Use *Menu → Languages and packs*; affected documents are re-read automatically afterwards.
   Without internet access, copy the `<pack>.traineddata` files (from
   [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)) into `data/tessdata/` and restart.
 
@@ -138,7 +160,8 @@ tests/                 automated tests
 config/config.json     settings                          (created on first start)
 data/documents/        copies of the added documents     (originals are never modified)
 data/index/            one JSON per document: text passages with their location
-data/tessdata/         OCR language packs (managed via Menu → OCR language packs)
+data/tessdata/         OCR language packs (managed via Menu → Languages and packs)
+data/models/meaning/   model for search by meaning (optional, managed there as well)
 python/                local Python
 website/               the web page advanced-ctrl-f.giit.ch (not part of the download, see website/README.md)
 ```

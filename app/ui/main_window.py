@@ -7,20 +7,21 @@ from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
 from PySide6.QtGui import QAction, QColor, QDesktopServices, QIcon, QKeySequence, QPainter, QPixmap, QShortcut
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFileDialog, QHBoxLayout,
                                QHeaderView, QInputDialog, QLabel, QLineEdit, QMainWindow, QMenu, QMessageBox, QProgressBar,
-                               QPushButton, QSplitter, QStackedWidget, QTableView, QToolButton, QTreeWidget,
+                               QPushButton, QSplitter, QStackedWidget, QStyle, QTableView, QToolButton, QTreeWidget,
                                QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from .. import __version__
 from .. import config as cfg
 from .. import diagnostics, opener, remote
 from ..ocr import OcrEngine
-from ..search import SearchIndex
+from .. import semantic
+from ..search import SearchIndex, folder_of, set_stemming_off
 from ..store import Store
 from . import theme
 from .ocr_languages import LanguagePacksDialog
 from .preview import Preview
 from .results import BarDelegate, HtmlDelegate, ResultsModel
-from .workers import JobThread, LoadThread
+from .workers import JobThread, LoadThread, MeaningThread
 
 TYPE_FILTERS = [
     ("All file types", set()),
@@ -83,6 +84,20 @@ class DropOverlay(QWidget):
         self.hide()
 
 
+FOLDER_SEP = "\x1f"   # joins folder parts into one key for the folder list
+FOLDER_ROLE = Qt.UserRole + 1
+
+
+class DocItem(QTreeWidgetItem):
+    """Row of the document list; folders sort before documents."""
+
+    def __lt__(self, other):
+        a, b = self.data(0, FOLDER_ROLE) is not None, other.data(0, FOLDER_ROLE) is not None
+        if a != b:
+            return a
+        col = self.treeWidget().sortColumn() if self.treeWidget() else 0
+        return self.text(col).casefold() < other.text(col).casefold()
+
 class MainWindow(QMainWindow):
     def __init__(self, app) -> None:
         super().__init__()
@@ -90,7 +105,9 @@ class MainWindow(QMainWindow):
         self.colors = theme.apply(app)
         self.store = Store(self.config)
         self.ocr = OcrEngine(cfg.TESSDATA_DIR, int(self.config.get("ocr_dpi", 300)), self.config.get("tessdata_url", ""))
+        set_stemming_off(self.config.get("stemming_off") or [])
         self.index = SearchIndex()
+        self.meaning_thread: MeaningThread | None = None
         self.ready = False
 
         self.setWindowTitle("Advanced Ctrl+F")
@@ -106,12 +123,17 @@ class MainWindow(QMainWindow):
         self.jobs.idle.connect(self._on_idle)
         self.jobs.ocr_installed.connect(self._on_ocr_installed)
         self.jobs.ocr_failed.connect(self._on_ocr_failed)
+        self.jobs.meaning_installed.connect(self._start_meaning)
+        self.jobs.meaning_failed.connect(self._on_meaning_failed)
         self.jobs.start()
 
         self.search_timer = QTimer(self, singleShot=True, interval=220)
         self.search_timer.timeout.connect(self.run_search)
 
         self.statusBar().showMessage("Loading index …")
+        self._load_index()
+
+    def _load_index(self) -> None:
         self.loader = LoadThread(self.store)
         self.loader.loaded.connect(self._on_loaded)
         self.loader.start()
@@ -140,6 +162,13 @@ class MainWindow(QMainWindow):
         self.search.textChanged.connect(lambda: self.search_timer.start())
         self.search.returnPressed.connect(self.run_search)
         hl.addWidget(self.search, 1)
+        self.scope_box = QComboBox()
+        self.scope_box.setToolTip("Search only in this folder (and its subfolders) - or type folder:name")
+        self.scope_box.setMinimumContentsLength(14)
+        self.scope_box.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.scope_box.addItem("All folders", "")
+        self.scope_box.currentIndexChanged.connect(self.run_search)
+        hl.addWidget(self.scope_box)
         self.type_box = QComboBox()
         for label, _ in TYPE_FILTERS:
             self.type_box.addItem(label)
@@ -204,7 +233,7 @@ class MainWindow(QMainWindow):
         self.act_force.toggled.connect(lambda v: self._set_cfg("ocr_all_images", v))
         menu.addAction(self.act_ocr)
         menu.addAction(self.act_force)
-        menu.addAction("OCR language packs …", self.manage_ocr_packs)
+        menu.addAction("Languages and packs …", self.manage_ocr_packs)
         menu.addSeparator()
         menu.addAction("Add files …", self.add_files_dialog)
         menu.addAction("Add folder …", self.add_folder_dialog)
@@ -233,13 +262,15 @@ class MainWindow(QMainWindow):
         lay.addLayout(top)
         self.docs = QTreeWidget()
         self.docs.setHeaderLabels(["Name", "Type", "Size"])
-        self.docs.setRootIsDecorated(False)
+        self.docs.setRootIsDecorated(True)
         self.docs.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.docs.setSortingEnabled(True)
         self.docs.sortByColumn(0, Qt.AscendingOrder)
         self.docs.header().setSectionResizeMode(0, QHeaderView.Stretch)
         self.docs.header().setStretchLastSection(False)
         self.docs.itemDoubleClicked.connect(self._open_doc_item)
+        self.docs.itemClicked.connect(self._doc_item_clicked)
+        self._expanded: set[str] | None = None      # folder keys open in the list (None = not filled yet)
         self.docs.setContextMenuPolicy(Qt.CustomContextMenu)
         self.docs.customContextMenuRequested.connect(self._docs_menu)
         lay.addWidget(self.docs, 1)
@@ -387,15 +418,34 @@ class MainWindow(QMainWindow):
         self._busy(True)
 
     def manage_ocr_packs(self, first_start: bool = False) -> None:
-        """Choose, install and remove OCR language packs."""
+        """Languages: OCR packs, word forms per language, search by meaning."""
         self._set_cfg("ocr_first_start_asked", True)
-        dlg = LanguagePacksDialog(self, self.ocr, first_start)
+        dlg = LanguagePacksDialog(self, self.ocr, first_start, self.config, cfg.MEANING_DIR)
         if dlg.exec() != LanguagePacksDialog.Accepted:
             if first_start or not self.ocr.available():
                 self._set_cfg("ocr_download_declined", True)
-                self.statusBar().showMessage("OCR skipped - choose ⚙ Menu → OCR language packs any time", 8000)
+                self.statusBar().showMessage("OCR skipped - choose ⚙ Menu → Languages and packs any time", 8000)
             return
         self._set_cfg("ocr_download_declined", False)
+        if dlg.stemming_off != sorted(self.config.get("stemming_off") or []):
+            self._set_cfg("stemming_off", dlg.stemming_off)
+            set_stemming_off(dlg.stemming_off)
+            self.statusBar().showMessage("Word forms changed - rebuilding the index …", 6000)
+            self._load_index()
+        self._set_cfg("meaning_enabled", dlg.meaning_enabled)
+        if dlg.meaning_remove:
+            self._stop_meaning()
+            self.index.attach_model(None)
+            semantic.remove(cfg.MEANING_DIR)
+            self.statusBar().showMessage("Meaning model removed", 6000)
+        elif dlg.meaning_install:
+            self.jobs.submit("meaning_download", None)
+            self._busy(True)
+        elif not dlg.meaning_enabled and self.index.model is not None:
+            self._stop_meaning()
+            self.index.attach_model(None)
+        elif dlg.meaning_enabled and self.index.model is None:
+            self._start_meaning()
         if dlg.to_remove:
             self.ocr.remove(dlg.to_remove)
             self.statusBar().showMessage(f"Removed {len(dlg.to_remove)} language pack(s)", 6000)
@@ -428,8 +478,25 @@ class MainWindow(QMainWindow):
         self.reindex([d for d in self.index.docs.values() if d.get("status") != "ok"])
 
     def selected_docs(self) -> list[dict]:
-        return [self.index.docs[i.data(0, Qt.UserRole)] for i in self.docs.selectedItems()
-                if i.data(0, Qt.UserRole) in self.index.docs]
+        """Selected documents; a selected folder stands for all documents inside it."""
+        out, seen = [], set()
+
+        def collect(item):
+            did = item.data(0, Qt.UserRole)
+            if did in self.index.docs and did not in seen:
+                seen.add(did)
+                out.append(self.index.docs[did])
+            for k in range(item.childCount()):
+                collect(item.child(k))
+        for it in self.docs.selectedItems():
+            collect(it)
+        return out
+
+    def _doc_item_clicked(self, item, _col) -> None:
+        """A click on a folder searches only in that folder."""
+        key = item.data(0, FOLDER_ROLE)
+        if key is not None:
+            self.set_scope(tuple(key.split(FOLDER_SEP)))
 
     def remove_selected(self):
         docs = self.selected_docs()
@@ -447,13 +514,25 @@ class MainWindow(QMainWindow):
         self.run_search()
 
     def _docs_menu(self, pos):
+        item = self.docs.itemAt(pos)
+        key = item.data(0, FOLDER_ROLE) if item is not None else None
         docs = self.selected_docs()
         if not docs:
             return
         m = QMenu(self)
+        if key is not None:
+            folder = tuple(key.split(FOLDER_SEP))
+            m.addAction("Search only in this folder", lambda: self.set_scope(folder))
+            m.addAction(f"Re-read all {len(docs)} document(s)", lambda: self.reindex(docs))
+            m.addSeparator()
+            m.addAction("Remove folder …", self.remove_selected)
+            m.exec(self.docs.viewport().mapToGlobal(pos))
+            return
         m.addAction("Open", lambda: self._open_doc(docs[0], None))
         m.addAction("Show in folder", lambda: opener.show_in_folder(self.store.stored_path(docs[0])))
         m.addAction("Search only in this document", lambda: self._search_in(docs[0]))
+        if folder_of(docs[0]):
+            m.addAction("Search only in this folder", lambda: self.set_scope(folder_of(docs[0])))
         m.addAction("Re-read", lambda: self.reindex(docs))
         m.addSeparator()
         m.addAction("Remove …", self.remove_selected)
@@ -464,10 +543,58 @@ class MainWindow(QMainWindow):
         text = " ".join(w for w in self.search.text().split() if not w.lower().startswith(("file:", "datei:")))
         self.search.setText(f'{text} file:{name}'.strip())
 
+    def set_scope(self, folder) -> None:
+        """Restrict the search to a folder (None = all documents)."""
+        i = self.scope_box.findData(FOLDER_SEP.join(folder) if folder else "")
+        self.scope_box.setCurrentIndex(max(0, i))
+
+    def current_scope(self) -> tuple[str, ...] | None:
+        key = self.scope_box.currentData()
+        return tuple(key.split(FOLDER_SEP)) if key else None
+
+    def _refresh_scope(self) -> None:
+        current = self.scope_box.currentData()
+        self.scope_box.blockSignals(True)
+        self.scope_box.clear()
+        self.scope_box.addItem("All folders", "")
+        for parts, n in sorted(self.index.folders().items(), key=lambda kv: [p.casefold() for p in kv[0]]):
+            self.scope_box.addItem(f"{'    ' * (len(parts) - 1)}{parts[-1]}  ({n})", FOLDER_SEP.join(parts))
+            self.scope_box.setItemData(self.scope_box.count() - 1, " / ".join(parts), Qt.ToolTipRole)
+        i = self.scope_box.findData(current)
+        self.scope_box.setCurrentIndex(max(0, i))
+        self.scope_box.blockSignals(False)
+        self.scope_box.setVisible(self.scope_box.count() > 1)
+        if current and i < 0:                  # folder no longer exists
+            self.run_search()
+
+    def _folder_item(self, parts: tuple, items: dict, counts: dict) -> QTreeWidgetItem | None:
+        """Tree item of a folder, created with its parents on first use."""
+        if not parts:
+            return None
+        if parts not in items:
+            parent = self._folder_item(parts[:-1], items, counts)
+            n = counts.get(parts, 0)
+            it = DocItem([f"{parts[-1]}  ({n})", "", ""])
+            it.setIcon(0, self.style().standardIcon(QStyle.SP_DirIcon))
+            it.setData(0, FOLDER_ROLE, FOLDER_SEP.join(parts))
+            it.setToolTip(0, f"{' / '.join(parts)} - {n} document{'s' if n != 1 else ''}\n"
+                             "Click: search only in this folder")
+            f = it.font(0)
+            f.setBold(True)
+            it.setFont(0, f)
+            (parent.addChild(it) if parent is not None else self.docs.addTopLevelItem(it))
+            items[parts] = it
+        return items[parts]
+
     def _refresh_docs(self) -> None:
+        self._refresh_scope()
+        if any(it.data(0, FOLDER_ROLE) is not None for it in self._all_items()):   # remember open folders
+            self._expanded = {it.data(0, FOLDER_ROLE) for it in self._all_items()
+                              if it.data(0, FOLDER_ROLE) is not None and it.isExpanded()}
         self.docs.setSortingEnabled(False)
         self.docs.clear()
         c = self.colors
+        folders, counts = {}, self.index.folders()
         for d in self.index.docs.values():
             pages = d.get("pages")
             kind = (d.get("kind") or "").lower()
@@ -477,7 +604,10 @@ class MainWindow(QMainWindow):
             if count == 1:
                 unit = unit[:-1]  # "1 page", "1 slide", "1 section"
             amount = f"{'~' if pages and d.get('pages_approx') else ''}{count} {unit}"
-            it = QTreeWidgetItem([d.get("display_name") or d["name"], kind.upper(), amount])
+            parts = folder_of(d)
+            label = d.get("display_name") or d["name"]
+            short = label.split(" › ")[-1].rsplit("/", 1)[-1] if parts else label
+            it = DocItem([short, kind.upper(), amount])
             it.setData(0, Qt.UserRole, d["id"])
             status = d.get("status", "ok")
             it.setIcon(0, dot_icon(c["ok"] if status == "ok" else c["warn"] if status == "warn" else c["err"]))
@@ -491,8 +621,12 @@ class MainWindow(QMainWindow):
             if d.get("message"):
                 tip.append(d["message"])
             it.setToolTip(0, "\n".join(tip))
-            self.docs.addTopLevelItem(it)
+            parent = self._folder_item(parts, folders, counts)
+            (parent.addChild(it) if parent is not None else self.docs.addTopLevelItem(it))
         self.docs.setSortingEnabled(True)
+        for parts, it in folders.items():      # first time: top-level folders open, later as left by the user
+            key = FOLDER_SEP.join(parts)
+            it.setExpanded(len(parts) == 1 if self._expanded is None else key in self._expanded)
         n = len(self.index.docs)
         self.docs_title.setText(f"Documents ({n})")
         self.docs_empty.setVisible(n == 0)
@@ -518,11 +652,14 @@ class MainWindow(QMainWindow):
             return
         kinds = TYPE_FILTERS[self.type_box.currentIndex()][1]
         limit = int(self.config.get("max_results", 300))
-        hits, q = self.index.search(text, kinds=set(kinds), limit=limit, one_per_doc=self.one_per_doc.isChecked())
+        folder = self.current_scope()
+        hits, q = self.index.search(text, kinds=set(kinds), limit=limit, one_per_doc=self.one_per_doc.isChecked(),
+                                    folder=folder)
         self.model.set_hits(hits, self.index)
         if hits:
             ndocs = len({h.doc_id for h in hits})
             self.results_title.setText(f"{len(hits)} hit(s) in {ndocs} document(s)"
+                                       + (f" · folder {' / '.join(folder)}" if folder else "")
                                        + (" (limited)" if len(hits) >= limit else ""))
             self.stack.setCurrentIndex(1)
             self.table.selectRow(0)
@@ -530,8 +667,10 @@ class MainWindow(QMainWindow):
             self.results_title.setText("")
             self.preview.clear()
             self.empty_title.setText("No hits")
-            self.empty_text.setText("Try a different spelling or fewer words.\n"
-                                    "Tip: use * for word beginnings (e.g. contr*) and \"…\" for phrases.")
+            self.empty_text.setText("Try a different spelling or fewer words."
+                                    + (f"\nOnly the folder {' / '.join(folder)} was searched - choose «All folders» "
+                                       "at the top to search everything." if folder else "")
+                                    + "\nTip: use * for word beginnings (e.g. contr*) and \"…\" for phrases.")
             self.stack.setCurrentIndex(0)
 
     def _update_empty(self):
@@ -549,7 +688,7 @@ class MainWindow(QMainWindow):
         else:
             self.empty_title.setText("What are you looking for?")
             self.empty_text.setText(f"{len(self.index.docs)} documents ready. Type a search term above (Ctrl+F).\n"
-                                    '"phrase"  ·  -exclude  ·  word*  ·  type:pdf  ·  file:name')
+                                    '"phrase"  ·  -exclude  ·  word*  ·  type:pdf  ·  file:name  ·  folder:name')
 
     def _on_row(self, current, _prev=None):
         if not current.isValid():
@@ -569,7 +708,7 @@ class MainWindow(QMainWindow):
     def _hit_word(self, hit, offset: int) -> str:
         """The highlighted word closest to the snippet position (used to jump to the hit in web pages)."""
         text = self.index.chunk_of(hit)["text"]
-        spans = self.index.highlights(text, hit.match_terms)
+        spans = self.index.highlights(text, hit.match_terms, hit.lang)
         if not spans:
             return ""
         s, e = min(spans, key=lambda sp: abs(sp[0] - offset))
@@ -585,6 +724,13 @@ class MainWindow(QMainWindow):
         cur = self._current()
         if cur:
             opener.show_in_folder(self.store.stored_path(self.index.docs[cur[0].doc_id]))
+
+    def _all_items(self):
+        stack = [self.docs.topLevelItem(i) for i in range(self.docs.topLevelItemCount())]
+        while stack:
+            it = stack.pop()
+            yield it
+            stack += [it.child(k) for k in range(it.childCount())]
 
     def _open_doc_item(self, item, _col):
         did = item.data(0, Qt.UserRole)
@@ -627,8 +773,46 @@ class MainWindow(QMainWindow):
         if self.search.text().strip():
             self.run_search()
         QTimer.singleShot(300, self._maybe_ask_ocr_on_first_start)  # after the window is visible
+        self._start_meaning()
         if self.ocr.available():  # e.g. language data copied by hand or Tesseract installed meanwhile
             self._on_ocr_installed()
+
+    # ------------------------------------------------ Search by meaning
+    def _stop_meaning(self) -> None:
+        if self.meaning_thread is not None:
+            self.meaning_thread.stop()
+            self.meaning_thread.wait(5000)
+            self.meaning_thread = None
+
+    def _start_meaning(self) -> None:
+        """Load the meaning model and compute the vectors of the current index in the background."""
+        self._stop_meaning()
+        if not (self.config.get("meaning_enabled", True) and semantic.available()
+                and semantic.installed(cfg.MEANING_DIR)):
+            return
+        th = MeaningThread(self.index, cfg.MEANING_DIR)
+        th.progress.connect(lambda d, t: self.statusBar().showMessage(
+            f"Preparing search by meaning … {d} of {t} passages", 2000))
+        th.ready.connect(lambda model, vecs, ix=self.index: self._on_meaning_ready(ix, model, vecs))
+        th.failed.connect(self._on_meaning_failed)
+        self.meaning_thread = th
+        th.start()
+
+    def _on_meaning_ready(self, ix, model, vecs) -> None:
+        self.meaning_thread = None
+        if ix is not self.index:          # the index was rebuilt meanwhile
+            self._start_meaning()
+            return
+        ix.attach_model(model, vecs)
+        self.statusBar().showMessage("Search by meaning is ready", 5000)
+        if self.search.text().strip():
+            self.run_search()
+
+    def _on_meaning_failed(self, reason: str) -> None:
+        self.meaning_thread = None
+        QMessageBox.warning(self, "Search by meaning",
+                            f"Search by meaning is not available:\n{reason}\n\n"
+                            "The normal search works as before. Try again via ⚙ Menu → Languages and packs.")
 
     def _on_ocr_installed(self):
         """Language data arrived: re-read everything that could not be OCR'd before."""
@@ -715,6 +899,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e):
         self.config["window"] = {"geometry": bytes(self.saveGeometry().toBase64()).decode()}
         self.config.save()
+        self._stop_meaning()
         self.jobs.stop()
         self.jobs.wait(3000)
         super().closeEvent(e)
