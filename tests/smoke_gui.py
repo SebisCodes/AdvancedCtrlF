@@ -21,6 +21,7 @@ tessdata = cfg.TESSDATA_DIR                        # keep using downloaded OCR d
 cfg.DOCS_DIR, cfg.INDEX_DIR, cfg.CONFIG_DIR = tmp / "documents", tmp / "index", tmp / "config"
 cfg.CONFIG_FILE, cfg.LOG_FILE = cfg.CONFIG_DIR / "config.json", tmp / "app.log"
 cfg.TESSDATA_DIR = tessdata
+cfg.DEFAULTS["auto_update"] = False                # no network access during the test
 
 import samples  # noqa: E402
 from PySide6.QtCore import QTimer  # noqa: E402

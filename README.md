@@ -148,6 +148,30 @@ PDF and image pages with the hits highlighted.
   Without internet access, copy the `<pack>.traineddata` files (from
   [tessdata_fast](https://github.com/tesseract-ocr/tessdata_fast)) into `data/tessdata/` and restart.
 
+## Updates
+
+Once a day, a few seconds after the start, Advanced Ctrl+F looks in the background for a new version
+(*Menu → Automatic updates* switches this off; *Menu → Check for updates now* looks immediately). A new
+version is downloaded and checked, then you choose: **Restart and update now** (also after a 10-second
+countdown), **Later** (asked again at the next start) or **Skip this version**. Without internet access, or
+with updates switched off, the program starts as fast as ever – the check never blocks starting or closing.
+
+How an update is checked:
+
+1. `https://advanced-ctrl-f.giit.ch/updates/latest.json` describes the newest version (version, archive
+   address, size, SHA-256). It is signed with the maintainer's Ed25519 key; the program contains only the
+   public key and rejects any description without a valid signature – so even someone with access to the
+   web server cannot publish an update.
+2. Only a higher version is accepted, and only an archive below `updates/` on that site.
+3. Size and SHA-256 of the downloaded archive must match the signed values, and the archive must contain
+   exactly that version of the program.
+4. When updating, the program files are moved to `data/updates/backup-<version>/` and replaced; `data/`,
+   `config/` and `python/` are never touched. If anything fails, the backup is restored. The launcher then
+   installs changed packages.
+
+A program folder that is a Git checkout is never changed (update it with `git pull`). Checksums of all
+release archives, for manual downloads: `https://advanced-ctrl-f.giit.ch/updates/SHA256SUMS`.
+
 ## Folder layout
 
 ```
@@ -162,6 +186,7 @@ data/documents/        copies of the added documents     (originals are never mo
 data/index/            one JSON per document: text passages with their location
 data/tessdata/         OCR language packs (managed via Menu → Languages and packs)
 data/models/meaning/   model for search by meaning (optional, managed there as well)
+data/updates/          prepared update and the backup of the previous version
 python/                local Python
 ```
 
@@ -172,6 +197,7 @@ The JSON files in `data/index/` are plain and documented by example – each pas
 
 - Python runs in isolated mode (`-I`): no `PYTHONPATH`, no user site-packages, no current directory on `sys.path`
 - Downloads only over HTTPS; every download is verified (published checksums, and on Windows also the code signature)
+- Updates are installed only with a valid Ed25519 signature and matching SHA-256 (see *Updates*)
 - XML with entity definitions is rejected (no XXE / "billion laughs"); archives are extracted without path
   traversal, links, or unbounded sizes
 - Documents are copied without execute permission; executable file types are never launched

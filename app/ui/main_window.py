@@ -1,6 +1,7 @@
 """Main window of Advanced Ctrl+F."""
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from PySide6.QtCore import QByteArray, QSize, Qt, QTimer, QUrl
@@ -21,7 +22,7 @@ from . import theme
 from .ocr_languages import LanguagePacksDialog
 from .preview import Preview
 from .results import BarDelegate, HtmlDelegate, ResultsModel
-from .workers import JobThread, LoadThread, MeaningThread
+from .workers import JobThread, LoadThread, MeaningThread, UpdateWorker
 
 TYPE_FILTERS = [
     ("All file types", set()),
@@ -86,6 +87,7 @@ class DropOverlay(QWidget):
 
 FOLDER_SEP = "\x1f"   # joins folder parts into one key for the folder list
 FOLDER_ROLE = Qt.UserRole + 1
+RESTART_SECONDS = 10   # countdown before restarting after an update
 
 
 class DocItem(QTreeWidgetItem):
@@ -108,6 +110,11 @@ class MainWindow(QMainWindow):
         set_stemming_off(self.config.get("stemming_off") or [])
         self.index = SearchIndex()
         self.meaning_thread: MeaningThread | None = None
+        self.update_thread: UpdateWorker | None = None
+        self._update_manual = False
+        self._notice_shown = False
+        self._asking_update = False
+        self._staged_offered = False
         self.ready = False
 
         self.setWindowTitle("Advanced Ctrl+F")
@@ -246,6 +253,13 @@ class MainWindow(QMainWindow):
         menu.addSeparator()
         menu.addAction("Open log file", self.open_log)
         menu.addAction("Copy diagnostics (for support)", self.copy_diagnostics)
+        menu.addSeparator()
+        self.act_update = QAction("Automatic updates", self, checkable=True)
+        self.act_update.setChecked(bool(self.config.get("auto_update", True)))
+        self.act_update.setToolTip("Look for a new version once a day, install it and restart")
+        self.act_update.toggled.connect(lambda v: self._set_cfg("auto_update", v))
+        menu.addAction(self.act_update)
+        menu.addAction("Check for updates now", lambda: self.check_updates(manual=True))
         menu.addSeparator()
         menu.addAction("Search help", lambda: QMessageBox.information(self, "Help", HELP))
         menu.addAction(f"About Advanced Ctrl+F {__version__}", self.show_about)
@@ -774,8 +788,150 @@ class MainWindow(QMainWindow):
             self.run_search()
         QTimer.singleShot(300, self._maybe_ask_ocr_on_first_start)  # after the window is visible
         self._start_meaning()
+        QTimer.singleShot(500, self._show_update_notice)
+        QTimer.singleShot(1500, self._offer_staged)
+        QTimer.singleShot(8000, self._auto_update_check)
         if self.ocr.available():  # e.g. language data copied by hand or Tesseract installed meanwhile
             self._on_ocr_installed()
+
+    # ------------------------------------------------ Updates
+    def _show_update_notice(self) -> None:
+        """Once per program start: report an update that was applied before the restart."""
+        from .. import updater   # loaded on use: keeps the start fast
+        if self._notice_shown:
+            return
+        self._notice_shown = True
+        notice = self.config.get("update_notice") or ""
+        if ">" in notice:
+            self._set_cfg("update_notice", "")
+            old, new = notice.split(">", 1)
+            QMessageBox.information(self, "Advanced Ctrl+F updated",
+                                    f"Advanced Ctrl+F was updated from version {old} to {new}.\n\n"
+                                    f"What's new: {updater.PAGE_URL}/commits/main")
+
+    def _offer_staged(self) -> None:
+        """An update prepared earlier («Later») is offered again - local check, no network."""
+        from .. import updater   # loaded on use: keeps the start fast
+        if self._staged_offered or not self.config.get("auto_update", True):
+            return
+        self._staged_offered = True
+        found = updater.staged(cfg.ROOT)
+        if found and found[0] != self.config.get("skip_version"):
+            self._on_update_staged(found[0])
+
+    def _auto_update_check(self) -> None:
+        if not self.config.get("auto_update", True):
+            return
+        last = self.config.get("last_update_check") or ""
+        try:
+            if last and datetime.now() - datetime.fromisoformat(last) < timedelta(hours=20):
+                return
+        except ValueError:
+            pass
+        self.check_updates(manual=False)
+
+    def check_updates(self, manual: bool = False) -> None:
+        """Look for a new version in the background and prepare it."""
+        if self.update_thread is not None and self.update_thread.isRunning():
+            return
+        self._set_cfg("last_update_check", datetime.now().isoformat(timespec="seconds"))
+        self._update_manual = manual
+        # signals arrive from a background thread: connected to methods of this window,
+        # Qt delivers them in the window's thread
+        th = UpdateWorker(install=manual or bool(self.config.get("auto_update", True)))
+        th.progress.connect(self._on_update_progress)
+        th.staged.connect(self._on_update_staged)
+        th.available.connect(self._on_update_available)
+        th.up_to_date.connect(self._on_up_to_date)
+        th.failed.connect(self._on_update_failed)
+        self.update_thread = th
+        if manual:
+            self.statusBar().showMessage("Checking for updates …", 5000)
+        th.start()
+
+    def _on_update_progress(self, msg: str) -> None:
+        self.statusBar().showMessage(msg, 5000)
+
+    def _on_up_to_date(self) -> None:
+        if self._update_manual:
+            QMessageBox.information(self, "Updates", f"You have the latest version ({__version__}).")
+
+    def _on_update_failed(self, reason: str) -> None:
+        if self._update_manual:            # automatic checks stay silent, e.g. without internet
+            QMessageBox.warning(self, "Updates", f"Checking for updates failed:\n{reason}")
+
+    def _on_update_available(self, version: str) -> None:
+        from .. import updater   # loaded on use: keeps the start fast
+        text = f"Version {version} is available (you have {__version__})."
+        if updater.is_git_checkout(cfg.ROOT):
+            text += "\nThis program folder is a Git checkout - update it with git pull."
+        self.statusBar().showMessage(text.replace("\n", " "), 15000)
+        if self._update_manual:
+            QMessageBox.information(self, "Updates", text)
+
+    def _on_update_staged(self, version: str) -> None:
+        if not self._update_manual and version == self.config.get("skip_version"):
+            return
+        if self._asking_update:
+            return
+        if self.jobs.pending:                    # never restart in the middle of reading documents
+            self.statusBar().showMessage(f"Version {version} is ready - it is offered when the current work is done",
+                                         15000)
+            self.jobs.idle.connect(lambda *_: self._ask_update(version), Qt.SingleShotConnection)
+            return
+        self._ask_update(version)
+
+    def _ask_update(self, version: str, seconds: int | None = None) -> None:
+        """Restart now (countdown) / Later / Skip this version."""
+        from .. import updater   # loaded on use: keeps the start fast
+        found = updater.staged(cfg.ROOT)
+        if not found or found[0] != version or self._asking_update:
+            return
+        self._asking_update = True
+        seconds = RESTART_SECONDS if seconds is None else seconds
+        box = QMessageBox(QMessageBox.Information, "Update available", "", parent=self)
+        now = box.addButton("Restart and update now", QMessageBox.AcceptRole)
+        later = box.addButton("Later", QMessageBox.RejectRole)
+        skip = box.addButton("Skip this version", QMessageBox.DestructiveRole)
+        box.setDefaultButton(now)
+        box.setEscapeButton(later)
+        left = [seconds]
+        timed_out = [False]
+
+        def tick():
+            box.setText(f"Advanced Ctrl+F {version} is ready to install (you have {__version__}).\n"
+                        "It was downloaded and its signature and checksum were verified.\n\n"
+                        f"The program restarts in {left[0]} s to update. Your documents and settings stay "
+                        "as they are.\n\n«Later»: you are asked again the next time you open the program.")
+            if left[0] <= 0:
+                timed_out[0] = True
+                box.accept()
+            left[0] -= 1
+        timer = QTimer(box, interval=1000)
+        timer.timeout.connect(tick)
+        tick()
+        timer.start()
+        box.exec()
+        timer.stop()
+        self._asking_update = False
+        clicked = box.clickedButton()
+        if clicked is skip:
+            self._set_cfg("skip_version", version)
+            updater.discard(cfg.ROOT)
+            self.statusBar().showMessage(f"Version {version} skipped - newer versions are offered again", 10000)
+        elif timed_out[0] or clicked is now:
+            try:
+                new = updater.apply(cfg.ROOT, found[1])
+            except Exception as e:
+                QMessageBox.warning(self, "Update", f"The update could not be installed:\n{e}\n\n"
+                                    "Advanced Ctrl+F keeps running with the current version.")
+                return
+            self._set_cfg("update_notice", f"{__version__}>{new}")
+            updater.restart(cfg.ROOT)
+            self.close()
+        else:
+            self.statusBar().showMessage(f"Version {version} is offered again the next time you open the program",
+                                         10000)
 
     # ------------------------------------------------ Search by meaning
     def _stop_meaning(self) -> None:

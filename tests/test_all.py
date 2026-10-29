@@ -286,6 +286,115 @@ class AnyFileAndRepositoryTests(Base):
             net.fetch_curl("http://example.org/a.bin", self.tmp / "x")
 
 
+class UpdaterTests(Base):
+    KEY = bytes(range(32))                       # test key only - releases use a private key
+
+    def program(self, version, name):
+        """A minimal program folder (as in a release archive) with the given version."""
+        root = self.tmp / name
+        (root / "app").mkdir(parents=True)
+        (root / "app" / "__init__.py").write_text(f'__version__ = "{version}"\n')
+        (root / "advanced_ctrl_f.py").write_text("print('start')\n")
+        (root / "start.sh").write_text(f"# launcher {version}\n")
+        return root
+
+    def release(self, src, version):
+        """Release archive + signed description, as the release tool writes them."""
+        import hashlib
+        import json as _json
+        import zipfile
+        from app import ed25519, updater
+        z = self.tmp / f"AdvancedCtrlF-{version}.zip"
+        with zipfile.ZipFile(z, "w") as zf:
+            for p in sorted(src.rglob("*")):
+                if p.is_file():
+                    zf.write(p, f"AdvancedCtrlF-{version}/{p.relative_to(src).as_posix()}")
+        manifest = {"version": version, "url": updater.SITE + z.name, "size": z.stat().st_size,
+                    "sha256": hashlib.sha256(z.read_bytes()).hexdigest(), "published": "2026-10-29"}
+        raw = _json.dumps(manifest, sort_keys=True).encode()
+        return z, raw, ed25519.sign(self.KEY, raw).hex()
+
+    def test_ed25519_rfc8032(self):
+        from app import ed25519
+        sk = bytes.fromhex("4ccd089b28ff96da9db6c346ec114e0f5b8a319f35aba624da8cf6ed4fb8a6fb")
+        sig = bytes.fromhex("92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da"
+                            "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00")
+        pk = ed25519.public_key(sk)
+        self.assertEqual(pk.hex(), "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c")
+        self.assertEqual(ed25519.sign(sk, b"\x72"), sig)
+        self.assertTrue(ed25519.verify(pk, b"\x72", sig))
+        self.assertFalse(ed25519.verify(pk, b"\x73", sig))
+
+    def test_manifest_must_be_signed_and_valid(self):
+        import json as _json
+        from app import ed25519, updater
+        pub = ed25519.public_key(self.KEY)
+        _, raw, sig = self.release(self.program("1.5.0", "src"), "1.5.0")
+        self.assertEqual(updater.check_manifest(raw, sig, pub)["version"], "1.5.0")
+        self.assertTrue(updater.newer(updater.check_manifest(raw, sig, pub), "1.4.0"))
+        self.assertFalse(updater.newer(updater.check_manifest(raw, sig, pub), "1.10.0"))   # numeric order
+        with self.assertRaises(updater.UpdateError):
+            updater.check_manifest(raw.replace(b"1.5.0", b"1.6.0"), sig, pub)         # changed after signing
+        with self.assertRaises(updater.UpdateError):
+            updater.check_manifest(raw, sig, ed25519.public_key(bytes(32)))          # someone else's key
+        for change in ({"url": "https://example.org/x.zip"}, {"sha256": "abc"}, {"size": 0}):
+            m = {**_json.loads(raw), **change}
+            r = _json.dumps(m).encode()
+            with self.assertRaises(updater.UpdateError):
+                updater.check_manifest(r, ed25519.sign(self.KEY, r).hex(), pub)
+
+    def test_stage_apply_keeps_data_and_rejects_wrong_archives(self):
+        import json as _json
+        from app import ed25519, net, updater
+        pub = ed25519.public_key(self.KEY)
+        root = self.program("1.4.0", "installed")
+        for keep in ("data/index/doc.json", "config/config.json", "python/bin/python3"):
+            (root / keep).parent.mkdir(parents=True, exist_ok=True)
+            (root / keep).write_text("mine")
+        new = self.program("1.5.0", "new")
+        (new / "config").mkdir()
+        (new / "config" / "config.json").write_text("from the archive")           # must never be used
+        z, raw, sig = self.release(new, "1.5.0")
+        manifest = updater.check_manifest(raw, sig, pub)
+        saved = net.download
+        try:
+            net.download = lambda url, dest, *a, **k: shutil.copyfile(z, dest)
+            bad = {**manifest, "sha256": "0" * 64}
+            with self.assertRaises(updater.UpdateError):                          # checksum mismatch
+                updater.stage(root, bad)
+            self.assertIsNone(updater.staged(root, "1.4.0"))
+            staged_dir = updater.stage(root, manifest)
+        finally:
+            net.download = saved
+        self.assertEqual(updater.staged(root, "1.4.0")[0], "1.5.0")
+        self.assertIsNone(updater.staged(root, "1.5.0"))                           # not newer -> not offered
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())        # nothing changed yet
+        self.assertEqual(updater.apply(root, staged_dir), "1.5.0")
+        self.assertIn("1.5.0", (root / "app" / "__init__.py").read_text())
+        self.assertIn("1.5.0", (root / "start.sh").read_text())
+        for keep in ("data/index/doc.json", "config/config.json", "python/bin/python3"):
+            self.assertEqual((root / keep).read_text(), "mine")
+        self.assertTrue(any((root / "data" / "updates").glob("backup-*/app/__init__.py")))
+        self.assertFalse(staged_dir.exists())
+
+    def test_wrong_version_in_archive_and_git_checkout(self):
+        from app import ed25519, net, updater
+        pub = ed25519.public_key(self.KEY)
+        root = self.program("1.4.0", "installed2")
+        z, raw, sig = self.release(self.program("1.5.0", "src2"), "1.6.0")      # archive says 1.5.0
+        saved = net.download
+        try:
+            net.download = lambda url, dest, *a, **k: shutil.copyfile(z, dest)
+            with self.assertRaises(updater.UpdateError):
+                updater.stage(root, updater.check_manifest(raw, sig, pub))
+            (root / ".git").mkdir()
+            with self.assertRaises(updater.UpdateError):                          # never touch a checkout
+                updater.stage(root, updater.check_manifest(raw, sig, pub))
+        finally:
+            net.download = saved
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())
+
+
 class LanguageTests(Base):
     SAMPLES = {
         "en": "The contract can be terminated by either party with three months notice and the deposit is returned.",

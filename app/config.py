@@ -35,6 +35,10 @@ DEFAULTS: dict = {
     "meaning_enabled": True,      # search by meaning when the model is installed
     "meaning_url": "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/{file}",
     "stemming_off": [],           # languages (ISO codes) whose words are not reduced to their stem
+    "auto_update": True,          # look for new versions once a day, install them and restart
+    "last_update_check": "",      # ISO time of the last automatic check
+    "update_notice": "",          # "1.4.0>1.5.0" after an update, shown once after the restart
+    "skip_version": "",           # version the user chose to skip
     "max_file_mb": 500,
     "max_results": 300,
     "one_hit_per_doc": False,

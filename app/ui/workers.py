@@ -3,9 +3,10 @@ from __future__ import annotations
 
 import logging
 import queue
+import threading
 from pathlib import Path
 
-from PySide6.QtCore import QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal
 
 from .. import config as cfg
 from .. import remote, semantic
@@ -31,6 +32,49 @@ class LoadThread(QThread):
             except Exception:
                 log.exception("Index for %s is broken", doc.get("name"))
         self.loaded.emit(ix)
+
+
+class UpdateWorker(QObject):
+    """Looks for a newer version and prepares it (download, signature and checksum check,
+    unpack) - unless `install` is False or the program folder is a Git checkout. Runs in a
+    daemon thread: without internet it never delays starting or closing the program. The
+    program files themselves are only replaced later, in the window, when the user restarts."""
+    progress = Signal(str)
+    available = Signal(str)                # newer version exists, not prepared
+    staged = Signal(str)                   # newer version downloaded, checked and ready to apply
+    up_to_date = Signal()
+    failed = Signal(str)
+
+    def __init__(self, install: bool = True) -> None:
+        super().__init__()
+        self.install = install
+        self.done = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def start(self) -> None:
+        self._thread = threading.Thread(target=self.run, name="update", daemon=True)
+        self._thread.start()
+
+    def isRunning(self) -> bool:
+        return self._thread is not None and not self.done.is_set()
+
+    def run(self) -> None:
+        from .. import updater
+        try:
+            manifest = updater.fetch_manifest()
+            version = manifest["version"].lstrip("v")
+            if not updater.newer(manifest):
+                self.up_to_date.emit()
+            elif not self.install or updater.is_git_checkout(cfg.ROOT):
+                self.available.emit(version)
+            else:
+                updater.stage(cfg.ROOT, manifest, self.progress.emit)
+                self.staged.emit(version)
+        except Exception as e:
+            log.info("Update check failed: %s", e)
+            self.failed.emit(str(e))
+        finally:
+            self.done.set()
 
 
 class MeaningThread(QThread):
