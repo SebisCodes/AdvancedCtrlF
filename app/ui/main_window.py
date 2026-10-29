@@ -888,6 +888,7 @@ class MainWindow(QMainWindow):
         if not found or found[0] != version or self._asking_update:
             return
         self._asking_update = True
+        self._staged_offered = True              # asked once per program start, whatever the answer
         seconds = RESTART_SECONDS if seconds is None else seconds
         box = QMessageBox(QMessageBox.Information, "Update available", "", parent=self)
         now = box.addButton("Restart and update now", QMessageBox.AcceptRole)
