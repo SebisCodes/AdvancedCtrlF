@@ -196,8 +196,23 @@ The JSON files in `data/index/` are plain and documented by example – each pas
 ## Security
 
 - Python runs in isolated mode (`-I`): no `PYTHONPATH`, no user site-packages, no current directory on `sys.path`
-- Downloads only over HTTPS; every download is verified (published checksums, and on Windows also the code signature)
-- Updates are installed only with a valid Ed25519 signature and matching SHA-256 (see *Updates*)
+- Downloads only over HTTPS, and checked as follows:
+  - Python: SHA-256 against the published checksums; on Windows SHA-512 plus the code signature of the
+    Python Software Foundation. A Python installer placed in `python\` by hand is run only with a valid
+    signature of the Python Software Foundation.
+  - OCR language packs: pinned to a fixed commit of `tesseract-ocr/tessdata_fast`; each pack must match its
+    SHA-256 in `app/ocr_checksums.py`. Packs copied from a local Tesseract installation are used as they are.
+  - Meaning model: pinned to a fixed revision; each file must match its SHA-256 in `app/semantic.py`.
+  - Updates: valid Ed25519 signature and matching SHA-256 (see *Updates*).
+  - Python packages: installed by pip from PyPI, which checks each file against the hash published by
+    PyPI. Versions are not pinned, so that new Python versions get matching packages; an existing
+    installation only installs packages again when `requirements.txt` changes.
+  - Documents added from a link are user content and are not checked – they are only read, never run.
+- Office files that can contain macros (.docm, .xlsm, .pptm, .doc, .xls, .ppt, …) are never opened from the
+  program – only their folder is shown
+- On Windows the copies in `data/documents/` keep the "downloaded from the internet" mark (Mark of the Web) of
+  the original, of the archive they came from, or of the link they were downloaded from – Office and PDF
+  readers then use protected view
 - XML with entity definitions is rejected (no XXE / "billion laughs"); archives are extracted without path
   traversal, links, or unbounded sizes
 - Documents are copied without execute permission; executable file types are never launched

@@ -21,6 +21,35 @@ from .extractors import Context, ExtractError, extract, is_archive, sniff, suffi
 
 log = logging.getLogger(__name__)
 
+
+# ---------------------------------------------------------------- Mark of the Web (Windows)
+# Windows remembers in the stream "Zone.Identifier" that a file came from the internet; Office
+# and PDF readers then open it in protected view and block macros. A plain copy loses that
+# stream, so it is carried over to the stored copy (from the original, from the archive a file
+# came out of, or set to "internet" for downloads).
+def read_zone(path: Path) -> str | None:
+    if os.name != "nt":
+        return None
+    try:
+        with open(f"{path}:Zone.Identifier", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return None
+
+
+def internet_zone(url: str) -> str:
+    return f"[ZoneTransfer]\r\nZoneId=3\r\nHostUrl={url}\r\n"
+
+
+def write_zone(path: Path, zone: str | None) -> None:
+    if os.name != "nt" or not zone:
+        return
+    try:
+        with open(f"{path}:Zone.Identifier", "w", encoding="utf-8") as f:
+            f.write(zone)
+    except OSError as e:                 # e.g. FAT/exFAT drives have no streams
+        log.info("Zone.Identifier for %s not written: %s", path.name, e)
+
 MAX_ARCHIVE_TOTAL = 4 * 1024 ** 3   # protection against zip bombs
 MAX_ARCHIVE_MEMBERS = 100_000      # large repositories have tens of thousands of files
 MAX_ARCHIVE_DEPTH = 3
@@ -181,7 +210,7 @@ class Store:
 
     # ------------------------------------------------------------ Adding
     def add_path(self, src: Path, ctx: Context, display_prefix: str = "", depth: int = 0,
-                 extra: dict | None = None, base: Path | None = None) -> list[dict]:
+                 extra: dict | None = None, base: Path | None = None, zone: str | None = None) -> list[dict]:
         """Add a file, folder or archive. Returns new/updated documents.
         `extra` is stored with every document (e.g. the source URL); for folders, display
         names are relative to `base` (default: the folder's parent, i.e. include its name)."""
@@ -195,7 +224,7 @@ class Store:
                 ctx.progress(f"File {n}/{len(files)}")
                 folder = p.parent.relative_to(base).as_posix()
                 prefix = display_prefix + ("" if folder == "." else f"{folder}/")
-                docs += self.add_path(p, ctx, prefix, depth, extra)
+                docs += self.add_path(p, ctx, prefix, depth, extra, zone=zone)
             return docs
         size = src.stat().st_size
         if size > self.config.get("max_file_mb", 500) * 1024 * 1024:
@@ -203,6 +232,7 @@ class Store:
         if is_archive(src) and depth < MAX_ARCHIVE_DEPTH:
             ctx.progress(f"Unpacking {src.name} …")
             docs = []
+            member_zone = zone or read_zone(src) or (internet_zone(extra["source"]) if (extra or {}).get("source") else None)
             with tempfile.TemporaryDirectory() as tmp:
                 try:
                     files = unpack_archive(src, Path(tmp))
@@ -213,9 +243,9 @@ class Store:
                         break
                     rel = f.relative_to(tmp).as_posix()
                     prefix = f"{display_prefix}{src.name} › {rel.rsplit('/', 1)[0] + '/' if '/' in rel else ''}"
-                    docs += self.add_path(f, ctx, prefix, depth + 1, extra)
+                    docs += self.add_path(f, ctx, prefix, depth + 1, extra, zone=member_zone)
             return docs
-        return [self._add_file(src, ctx, display_prefix, extra)]
+        return [self._add_file(src, ctx, display_prefix, extra, zone)]
 
     def add_repository_archive(self, archive: Path, label: str, ctx: Context, subpath: str = "",
                                extra: dict | None = None) -> list[dict]:
@@ -237,7 +267,8 @@ class Store:
                 return self.add_path(start, ctx, f"{label} › " + ("" if rel == "." else f"{rel}/"), 0, extra)
             return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root)
 
-    def _add_file(self, src: Path, ctx: Context, display_prefix: str, extra: dict | None = None) -> dict:
+    def _add_file(self, src: Path, ctx: Context, display_prefix: str, extra: dict | None = None,
+                  zone: str | None = None) -> dict:
         sha = sha1_file(src)
         with self._lock:
             existing = self._by_sha.get(sha)
@@ -249,6 +280,8 @@ class Store:
         shutil.copyfile(src, target)   # deliberately without permissions/metadata (no exec bit)
         if os.name != "nt":
             os.chmod(target, 0o644)
+        write_zone(target, zone or read_zone(src)
+                   or (internet_zone(extra["source"]) if (extra or {}).get("source") else None))
         doc = {
             "schema": SCHEMA, "id": doc_id, "sha1": sha, "name": src.name,
             "display_name": display_prefix + src.name, "stored": stored_name,

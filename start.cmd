@@ -120,12 +120,22 @@ for %%A in ("%PY_DIR%\*.zip" "%PY_DIR%\*.tar.gz" "%PY_DIR%\*.tgz" "%PY_DIR%\*.ta
         move /y "%%~fA" "%PY_DIR%\_archive\" >nul
     )
 )
+rem an installer is only run if it carries a valid signature of the Python Software Foundation
+rem (the path reaches PowerShell through an environment variable, never as command text)
 for %%A in ("%PY_DIR%\python-*.exe") do (
     if exist "%%~fA" if /i not "%%~nxA"=="python.exe" (
-        call :log Installing %%~nxA into "%PY_DIR%\installed" ...
-        "%%~fA" /quiet InstallAllUsers=0 TargetDir="%PY_DIR%\installed" Include_launcher=0 Include_test=0 PrependPath=0 Shortcuts=0 AssociateFiles=0
-        if not exist "%PY_DIR%\_archive" mkdir "%PY_DIR%\_archive"
-        move /y "%%~fA" "%PY_DIR%\_archive\" >nul
+        set "ACF_FILE=%%~fA"
+        powershell -NoProfile -NonInteractive -Command "$s = Get-AuthenticodeSignature -LiteralPath $env:ACF_FILE; if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'Python Software Foundation') { exit 1 }"
+        if errorlevel 1 (
+            call :log %%~nxA is not validly signed by the Python Software Foundation - not installed, moved to _blocked
+            if not exist "%PY_DIR%\_blocked" mkdir "%PY_DIR%\_blocked"
+            move /y "%%~fA" "%PY_DIR%\_blocked\" >nul
+        ) else (
+            call :log Installing %%~nxA into "%PY_DIR%\installed" ...
+            "%%~fA" /quiet InstallAllUsers=0 TargetDir="%PY_DIR%\installed" Include_launcher=0 Include_test=0 PrependPath=0 Shortcuts=0 AssociateFiles=0
+            if not exist "%PY_DIR%\_archive" mkdir "%PY_DIR%\_archive"
+            move /y "%%~fA" "%PY_DIR%\_archive\" >nul
+        )
     )
 )
 goto :eof

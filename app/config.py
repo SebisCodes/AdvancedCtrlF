@@ -31,9 +31,9 @@ DEFAULTS: dict = {
     "ocr_min_chars": 25,          # less text on a page -> OCR
     "ocr_download_declined": False,
     "ocr_first_start_asked": False,  # the download question is asked once on the first start
-    "tessdata_url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata",
+    "tessdata_url": "https://github.com/tesseract-ocr/tessdata_fast/raw/87416418657359cb625c412a48b6e1d6d41c29bd/{lang}.traineddata",
     "meaning_enabled": True,      # search by meaning when the model is installed
-    "meaning_url": "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/{file}",
+    "meaning_url": "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/73908c3438cf03b6a01bcb9611d62b23d0726f08/{file}",
     "stemming_off": [],           # languages (ISO codes) whose words are not reduced to their stem
     "auto_update": True,          # look for new versions once a day, install them and restart
     "last_update_check": "",      # ISO time of the last automatic check
@@ -68,6 +68,13 @@ def atomic_write_text(path: Path, text: str) -> None:
         raise
 
 
+# Download addresses saved by older versions (branch "main" - content could change)
+_UNPINNED = {
+    "tessdata_url": "https://github.com/tesseract-ocr/tessdata_fast/raw/main/{lang}.traineddata",
+    "meaning_url": "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/{file}",
+}
+
+
 class Config(dict):
     def __init__(self) -> None:
         super().__init__(DEFAULTS)
@@ -75,6 +82,9 @@ class Config(dict):
             data = json.loads(CONFIG_FILE.read_text(encoding="utf-8"))
             if isinstance(data, dict):
                 self.update({k: v for k, v in data.items() if k in DEFAULTS})
+                for key, old in _UNPINNED.items():   # addresses of a moving branch -> pinned version
+                    if self.get(key) == old:
+                        self[key] = DEFAULTS[key]
         except (OSError, ValueError):
             pass
 

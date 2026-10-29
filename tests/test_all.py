@@ -286,6 +286,74 @@ class AnyFileAndRepositoryTests(Base):
             net.fetch_curl("http://example.org/a.bin", self.tmp / "x")
 
 
+class DownloadIntegrityTests(Base):
+    def test_every_catalog_pack_has_a_checksum_and_urls_are_pinned(self):
+        from app import config as c, lang, ocr, semantic
+        from app.ocr_checksums import PACK_SHA256, TESSDATA_COMMIT
+        self.assertEqual({l.tess for l in lang.LANGUAGES} - set(PACK_SHA256), set())
+        self.assertIn(TESSDATA_COMMIT, c.DEFAULTS["tessdata_url"])
+        self.assertIn(TESSDATA_COMMIT, ocr.MIRROR)
+        self.assertIn(semantic.MODEL_REVISION, c.DEFAULTS["meaning_url"])
+        self.assertNotIn("/main/", c.DEFAULTS["tessdata_url"] + c.DEFAULTS["meaning_url"])
+
+    def test_pack_with_wrong_checksum_is_not_installed(self):
+        import app.ocr as ocrmod
+        from app import net
+        eng = OcrEngine(self.tmp / "td", 300, "https://example.org/{lang}.traineddata")
+        fake = b"\x00" * 3_000_000                                    # right size, wrong content
+        saved = net.methods
+        try:
+            net.methods = lambda: [("Python", lambda url, dest, *a: dest.write_bytes(fake))]
+            saved_sys = ocrmod.OcrEngine.system_packs
+            ocrmod.OcrEngine.system_packs = lambda self: {}
+            with self.assertRaises(RuntimeError) as cm:
+                eng.download(["eng"])
+            self.assertIn("checksum", str(cm.exception))
+        finally:
+            net.methods = saved
+            ocrmod.OcrEngine.system_packs = saved_sys
+        self.assertFalse((self.tmp / "td" / "eng.traineddata").exists())
+
+    def test_macro_documents_are_never_launched(self):
+        from app import opener
+        self.assertEqual(opener.SAFE_OPEN & opener.MACRO_CAPABLE, set())
+        for ext in (".docm", ".xlsm", ".pptm", ".doc", ".xls", ".ppt"):
+            self.assertNotIn(ext, opener.SAFE_OPEN)
+
+    @unittest.skipUnless(os.name == "nt", "Mark of the Web exists only on Windows (NTFS)")
+    def test_stored_copies_keep_mark_of_the_web(self):
+        import zipfile
+        from app.store import Store, internet_zone, read_zone, write_zone
+        cfg.DOCS_DIR, cfg.INDEX_DIR = self.tmp / "motw-docs", self.tmp / "motw-index"
+        store = Store(dict(cfg.DEFAULTS))
+        ctx = Context(dict(cfg.DEFAULTS), None)
+        src = self.tmp / "from-web.txt"
+        src.write_text("Kuendigung des Vertrags")
+        write_zone(src, internet_zone("https://example.org/from-web.txt"))
+        doc = store.add_path(src, ctx)[0]
+        self.assertIn("ZoneId=3", read_zone(store.stored_path(doc)) or "")
+        z = self.tmp / "web.zip"                              # files out of a marked archive are marked too
+        with zipfile.ZipFile(z, "w") as zf:
+            zf.writestr("inner.txt", "Inhalt aus dem Archiv")
+        write_zone(z, internet_zone("https://example.org/web.zip"))
+        inner = store.add_path(z, ctx)[0]
+        self.assertIn("ZoneId=3", read_zone(store.stored_path(inner)) or "")
+
+    def test_old_settings_with_moving_branch_are_pinned(self):
+        import json as _json
+        from app import config as c
+        saved = c.CONFIG_FILE
+        try:
+            c.CONFIG_FILE = self.tmp / "old-config.json"
+            c.CONFIG_FILE.write_text(_json.dumps({"tessdata_url": c._UNPINNED["tessdata_url"],
+                                                  "meaning_url": c._UNPINNED["meaning_url"]}))
+            cfg_ = c.Config()
+            self.assertEqual(cfg_["tessdata_url"], c.DEFAULTS["tessdata_url"])
+            self.assertEqual(cfg_["meaning_url"], c.DEFAULTS["meaning_url"])
+        finally:
+            c.CONFIG_FILE = saved
+
+
 class UpdaterTests(Base):
     KEY = bytes(range(32))                       # test key only - releases use a private key
 

@@ -8,7 +8,7 @@ runs at search time: encoding is a vocabulary lookup plus an average, fast enoug
 every page of every document on an ordinary laptop.
 
 The model pack is downloaded once (tokenizer.json + model.safetensors in the Model2Vec
-format) and converted: the vectors are stored as int8 with one scale per row (a
+format) from a fixed revision; each file must match its SHA-256 below. It is converted: the vectors are stored as int8 with one scale per row (a
 quarter of the size), the word pieces as a plain JSON list. The original files are
 deleted afterwards.
 
@@ -17,6 +17,7 @@ into vocabulary pieces with the highest total log probability (Viterbi search).
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
@@ -34,8 +35,13 @@ try:
 except ImportError:            # without numpy the program runs, only without search by meaning
     np = None
 
-MODEL_FILES = ("tokenizer.json", "model.safetensors")
-DEFAULT_URL = "https://huggingface.co/minishlab/potion-multilingual-128M/resolve/main/{file}"
+MODEL_REVISION = "73908c3438cf03b6a01bcb9611d62b23d0726f08"
+MODEL_SHA256 = {
+    "tokenizer.json": "19f1909063da3cfe3bd83a782381f040dccea475f4816de11116444a73e1b6a1",
+    "model.safetensors": "14b5eb39cb4ce5666da8ad1f3dc6be4346e9b2d601c073302fa0a31bf7943397",
+}
+MODEL_FILES = tuple(MODEL_SHA256)
+DEFAULT_URL = f"https://huggingface.co/minishlab/potion-multilingual-128M/resolve/{MODEL_REVISION}/{{file}}"
 DOWNLOAD_MB = 531
 DISK_MB = 140
 WINDOW = 48          # word pieces per window of a long text
@@ -164,17 +170,28 @@ def install(folder: Path, url_template: str = DEFAULT_URL, progress=lambda msg: 
     raw.mkdir(exist_ok=True)
     for n, name in enumerate(MODEL_FILES, 1):
         dest = raw / name
-        if dest.is_file() and dest.stat().st_size > 1000:
+        if dest.is_file() and _sha256(dest) == MODEL_SHA256[name]:
             continue
         progress(f"Downloading meaning model ({n}/{len(MODEL_FILES)}: {name}) …")
         part = raw / (name + ".part")
         net.download(url_template.format(file=name), part,
                      lambda m, name=name: progress(f"Downloading meaning model ({name}): {m}"), cancelled)
+        if _sha256(part) != MODEL_SHA256[name]:
+            part.unlink()
+            raise RuntimeError(f"{name} does not match its checksum - not installed")
         part.replace(dest)
     progress("Converting meaning model …")
     convert(raw / "tokenizer.json", raw / "model.safetensors", folder)
     shutil.rmtree(raw, ignore_errors=True)
     progress("Meaning model ready.")
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    return h.hexdigest()
 
 
 def _safetensors_matrix(path: Path):

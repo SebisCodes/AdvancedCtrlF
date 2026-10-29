@@ -22,13 +22,17 @@ IS_MAC = sys.platform == "darwin"
 MAC_APPS = [Path("/Applications"), Path.home() / "Applications"]
 
 # Only these extensions may be handed to the default application.
+# Formats that can carry macros (.docm, .xlsm, .pptm and the old binary .doc/.xls/.ppt/.pps)
+# are not on this list: they are never launched from here, only their folder is shown.
 SAFE_OPEN = {
-    ".pdf", ".xps", ".oxps", ".epub", ".docx", ".docm", ".doc", ".dotx", ".odt", ".ott", ".rtf",
-    ".pptx", ".pptm", ".ppt", ".ppsx", ".pps", ".odp", ".xlsx", ".xlsm", ".xls", ".ods", ".csv", ".tsv",
+    ".pdf", ".xps", ".oxps", ".epub", ".docx", ".dotx", ".odt", ".ott", ".rtf",
+    ".pptx", ".ppsx", ".odp", ".xlsx", ".ods", ".csv", ".tsv",
     ".txt", ".md", ".log", ".json", ".xml", ".html", ".htm", ".xhtml", ".eml", ".mht", ".mhtml", ".png",
     ".jpg", ".jpeg", ".gif", ".bmp", ".tif", ".tiff", ".webp", ".svg", ".yaml", ".yml", ".ini", ".toml",
     ".tex", ".pages", ".key",
 }
+MACRO_CAPABLE = {".docm", ".dotm", ".doc", ".dot", ".xlsm", ".xltm", ".xlsb", ".xls", ".xlt", ".xlam",
+                 ".pptm", ".potm", ".ppsm", ".ppt", ".pps", ".pot", ".ppam"}
 # Plain-text files that can safely be opened in an editor at a given line
 TEXT_LINE = {".txt", ".md", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".ini", ".toml", ".py",
              ".js", ".ts", ".sql", ".css", ".tex", ".sh", ".bat", ".ps1", ".c", ".h", ".cpp", ".java", ".cs",
@@ -194,6 +198,9 @@ def open_document(path: Path, target: dict | None, preferred_pdf: str = "", high
                 return True, f"Opened at line {line}"
     if ext not in SAFE_OPEN:
         show_in_folder(path)
+        if ext in MACRO_CAPABLE:
+            return True, ("Office files that can contain macros are not opened from here - folder opened "
+                          "instead. Open it yourself only if you trust it.")
         return True, "This file type is never launched for safety reasons - folder opened instead"
     if _default_open(path):
         return True, "Opened - please navigate to the hit manually" if (page or line) else "Opened"

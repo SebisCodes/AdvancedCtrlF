@@ -5,6 +5,7 @@ If missing, it can be downloaded to data/tessdata/ after asking the user.
 """
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import shutil
@@ -14,6 +15,7 @@ from pathlib import Path
 
 from . import lang as langmod
 from . import net
+from .ocr_checksums import PACK_SHA256, TESSDATA_COMMIT
 
 log = logging.getLogger(__name__)
 
@@ -55,7 +57,7 @@ def _system_tessdata() -> list[Path]:
     return cands
 
 
-MIRROR = "https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@main/{lang}.traineddata"
+MIRROR = f"https://cdn.jsdelivr.net/gh/tesseract-ocr/tessdata_fast@{TESSDATA_COMMIT}/{{lang}}.traineddata"
 
 
 def _check_traineddata(path: Path, min_size: int = 100_000) -> None:
@@ -64,6 +66,18 @@ def _check_traineddata(path: Path, min_size: int = 100_000) -> None:
         head = f.read(64).lstrip()
     if size < min_size or head[:1] == b"<":   # an HTML error/login page instead of the model
         raise RuntimeError(f"received an invalid file ({size} bytes) - possibly a proxy or login page")
+
+
+def _check_sha256(path: Path, code: str) -> None:
+    expected = PACK_SHA256.get(code)
+    if expected is None:
+        raise RuntimeError("no checksum is known for this pack - not installed")
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for block in iter(lambda: f.read(1 << 20), b""):
+            h.update(block)
+    if h.hexdigest() != expected:
+        raise RuntimeError("the file does not match its checksum - not installed")
 
 
 def _replace(src: Path, dst: Path) -> None:
@@ -136,7 +150,8 @@ class OcrEngine:
         """Install language packs. A pack found in a local Tesseract installation is copied;
         otherwise it is downloaded - trying Python (urllib), then PowerShell on Windows (Windows
         network stack incl. company proxies with Windows authentication) or curl on macOS/Linux
-        (system certificate store), then a CDN mirror if github.com is blocked."""
+        (system certificate store), then a CDN mirror if github.com is blocked. A download is
+        installed only if its SHA-256 matches the checksum of the pinned tessdata_fast commit."""
         self.own_dir.mkdir(parents=True, exist_ok=True)
         for stale in self.own_dir.glob("*.part"):   # leftovers of interrupted downloads
             _remove(stale)
@@ -166,6 +181,7 @@ class OcrEngine:
                     try:
                         fetch(url, part)
                         _check_traineddata(part, _min_size(l))
+                        _check_sha256(part, l)
                         _replace(part, target)
                         log.info("Downloaded %s via %s from %s", target.name, name, url)
                         break
