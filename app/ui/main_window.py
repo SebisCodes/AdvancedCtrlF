@@ -22,7 +22,7 @@ from . import theme
 from .ocr_languages import LanguagePacksDialog
 from .preview import Preview
 from .results import BarDelegate, HtmlDelegate, ResultsModel
-from .workers import JobThread, LoadThread, MeaningThread, UpdateWorker
+from .workers import JobThread, LoadThread, MeaningThread, PythonCheckWorker, UpdateWorker
 
 TYPE_FILTERS = [
     ("All file types", set()),
@@ -111,7 +111,9 @@ class MainWindow(QMainWindow):
         self.index = SearchIndex()
         self.meaning_thread: MeaningThread | None = None
         self.update_thread: UpdateWorker | None = None
+        self.python_check: PythonCheckWorker | None = None
         self._update_manual = False
+        self._python_manual = False
         self._notice_shown = False
         self._asking_update = False
         self._staged_offered = False
@@ -795,12 +797,82 @@ class MainWindow(QMainWindow):
             self._on_ocr_installed()
 
     # ------------------------------------------------ Updates
+    def _check_python(self, manual: bool) -> None:
+        """Only looks for a newer Python of the program's own; the user decides what happens."""
+        from .. import pyupdate   # loaded on use: keeps the start fast
+        if self.python_check is not None and self.python_check.isRunning():
+            return
+        if not pyupdate.is_managed(cfg.ROOT) or pyupdate.prepared(cfg.ROOT):
+            return
+        self._python_manual = manual
+        th = PythonCheckWorker()
+        th.available.connect(self._on_python_available)   # a window method: delivered in the window's thread
+        self.python_check = th
+        th.start()
+
+    def _on_python_available(self, version: str) -> None:
+        if not self._python_manual and version == self.config.get("python_skip_version"):
+            return
+        if self._asking_update:                  # one question at a time: after the program update
+            QTimer.singleShot(3000, lambda: self._on_python_available(version))
+            return
+        self._ask_python_update(version)
+
+    def _ask_python_update(self, version: str) -> None:
+        """Update (in the background) / Later / Skip this version."""
+        import sys
+        current = ".".join(map(str, sys.version_info[:3]))
+        self._asking_update = True
+        box = QMessageBox(QMessageBox.Information, "Python update available",
+                          f"Python {version} is available (Advanced Ctrl+F runs on Python {current}).\n\n"
+                          "«Update»: the new Python is downloaded, verified and set up with all packages "
+                          "in the background - you can keep working, even close the program. "
+                          "It is used from the next start; the old Python is then deleted.\n\n"
+                          "«Later»: you are asked again at the next update check.", parent=self)
+        update = box.addButton("Update", QMessageBox.AcceptRole)
+        later = box.addButton("Later", QMessageBox.RejectRole)
+        skip = box.addButton("Skip this version", QMessageBox.DestructiveRole)
+        box.setDefaultButton(update)
+        box.setEscapeButton(later)
+        box.exec()
+        self._asking_update = False
+        clicked = box.clickedButton()
+        if clicked is skip:
+            self._set_cfg("python_skip_version", version)
+            self.statusBar().showMessage(f"Python {version} skipped - newer versions are offered again", 10000)
+        elif clicked is update:
+            self._start_python_update()
+            self.statusBar().showMessage(f"Python {version} is being prepared in the background", 10000)
+
+    def _start_python_update(self) -> None:
+        """Prepare a newer Python in its own background process (switched at the next start)."""
+        from .. import pyupdate   # loaded on use: keeps the start fast
+        if not pyupdate.is_managed(cfg.ROOT) or pyupdate.prepared(cfg.ROOT):
+            return
+        try:
+            pyupdate.spawn(cfg.ROOT)
+        except OSError as e:
+            import logging
+            logging.getLogger(__name__).info("Python update not started: %s", e)
+            QMessageBox.warning(self, "Python update", f"The Python update could not be started:\n{e}")
+
+    def _show_python_notice(self) -> None:
+        """After the launcher switched to a newer Python: say so once."""
+        import sys
+        now = ".".join(map(str, sys.version_info[:3]))
+        before = self.config.get("python_version") or ""
+        if before != now:
+            self._set_cfg("python_version", now)
+            if before:
+                self.statusBar().showMessage(f"Now running on Python {now} (was {before})", 10000)
+
     def _show_update_notice(self) -> None:
         """Once per program start: report an update that was applied before the restart."""
         from .. import updater   # loaded on use: keeps the start fast
         if self._notice_shown:
             return
         self._notice_shown = True
+        self._show_python_notice()
         notice = self.config.get("update_notice") or ""
         if ">" in notice:
             self._set_cfg("update_notice", "")
@@ -838,6 +910,8 @@ class MainWindow(QMainWindow):
         self._update_manual = manual
         # signals arrive from a background thread: connected to methods of this window,
         # Qt delivers them in the window's thread
+        if manual or self.config.get("auto_update", True):
+            self._check_python(manual)
         th = UpdateWorker(install=manual or bool(self.config.get("auto_update", True)))
         th.progress.connect(self._on_update_progress)
         th.staged.connect(self._on_update_staged)

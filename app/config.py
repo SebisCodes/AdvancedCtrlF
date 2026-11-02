@@ -39,6 +39,8 @@ DEFAULTS: dict = {
     "last_update_check": "",      # ISO time of the last automatic check
     "update_notice": "",          # "1.4.0>1.5.0" after an update, shown once after the restart
     "skip_version": "",           # version the user chose to skip
+    "python_version": "",         # Python version of the last start (reports a switch once)
+    "python_skip_version": "",    # Python version the user chose to skip
     "max_file_mb": 500,
     "max_results": 300,
     "one_hit_per_doc": False,

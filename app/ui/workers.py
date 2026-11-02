@@ -77,6 +77,36 @@ class UpdateWorker(QObject):
             self.done.set()
 
 
+class PythonCheckWorker(QObject):
+    """Looks (only looks) for a newer version of the program's own Python, in a daemon thread."""
+    available = Signal(str)
+    nothing = Signal(str)                  # reason, e.g. up to date or no connection
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.done = threading.Event()
+
+    def start(self) -> None:
+        threading.Thread(target=self.run, name="python-check", daemon=True).start()
+
+    def isRunning(self) -> bool:
+        return not self.done.is_set()
+
+    def run(self) -> None:
+        from .. import pyupdate
+        try:
+            version = pyupdate.check(cfg.ROOT)
+            if version:
+                self.available.emit(version)
+            else:
+                self.nothing.emit("")
+        except Exception as e:
+            log.info("Python check failed: %s", e)
+            self.nothing.emit(str(e))
+        finally:
+            self.done.set()
+
+
 class MeaningThread(QThread):
     """Loads the meaning model and computes the vectors of all chunks of an index."""
     progress = Signal(int, int)            # chunks done, total

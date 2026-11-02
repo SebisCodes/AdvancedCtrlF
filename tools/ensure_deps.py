@@ -12,6 +12,7 @@ Exit code 0 = everything is in place.
 """
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -23,6 +24,8 @@ REQ = ROOT / "requirements.txt"
 CHECK_IMPORTS = ("PySide6.QtWidgets", "pymupdf", "openpyxl", "xlrd", "snowballstemmer", "numpy")
 PY = sys.executable
 LOG: Path | None = None
+# prepared in the background (python_update.py): no console windows on Windows
+FLAGS = 0x08000000 if os.name == "nt" and os.environ.get("ACF_NO_WINDOW") else 0
 
 
 def say(msg: str = "") -> None:
@@ -35,9 +38,9 @@ def say(msg: str = "") -> None:
 def run(*args) -> int:
     """Run Python with `args`; output goes to the console (and the log, if any)."""
     if not LOG:
-        return subprocess.call([PY, "-I", *args])
+        return subprocess.call([PY, "-I", *args], creationflags=FLAGS)
     proc = subprocess.Popen([PY, "-I", *args], stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                            text=True, encoding="utf-8", errors="replace")
+                            text=True, encoding="utf-8", errors="replace", creationflags=FLAGS)
     for line in proc.stdout:
         say(line.rstrip())
     return proc.wait()
@@ -46,7 +49,7 @@ def run(*args) -> int:
 def has_module(name: str) -> bool:
     # checked in a fresh process: changes to ._pth / new installs are not visible in this one
     return subprocess.call([PY, "-I", "-c", f"import {name}"], stdout=subprocess.DEVNULL,
-                           stderr=subprocess.DEVNULL) == 0
+                           stderr=subprocess.DEVNULL, creationflags=FLAGS) == 0
 
 
 def enable_site_packages() -> None:

@@ -11,6 +11,10 @@
 #       SHA256-verified) into ./python/ - Linux and macOS, x86_64 and arm64
 #    5. fallback: system python3 (in its own venv under ./python/venv)
 #
+#  A newer Python that the program prepared in the background (python/_next/,
+#  verified and with all packages) replaces the downloaded one at the next
+#  start; the old one is deleted.
+#
 #  Usage:  ./start.sh            start normally
 #          ./start.sh --setup    set up only, do not start
 #
@@ -20,6 +24,7 @@ set -euo pipefail
 
 PYTHON_BIN="${PYTHON_BIN:-}"     # e.g. PYTHON_BIN=/opt/python/bin/python3
 PY_VERSION="${PY_VERSION:-}"     # e.g. PY_VERSION=3.13  (empty = latest stable)
+export PY_VERSION                # also limits the background updates of Python
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PY_DIR="$ROOT/python"
@@ -46,7 +51,7 @@ find_python() {
     while IFS= read -r c; do
         works "$c" && { echo "$c"; return 0; }
     done < <(find "$PY_DIR" -maxdepth 6 \( -type f -o -type l \) \( -path '*/bin/python3' -o -path '*/bin/python3.[0-9]*' \) \
-             ! -name '*-config' 2>/dev/null | sort)
+             ! -name '*-config' ! -path "$PY_DIR/_next*" ! -path "$PY_DIR/_old/*" 2>/dev/null | sort)
     return 1
 }
 
@@ -139,8 +144,26 @@ system_venv() {
     "$sys_py" -m venv "$PY_DIR/venv" || { say "Could not create venv (package python3-venv missing?)"; return 1; }
 }
 
+switch_python() {
+    # python/_next/ holds a newer, verified Python with all packages (prepared by the program)
+    rm -rf "$PY_DIR/_old"                                    # left over from an earlier switch
+    [ -f "$PY_DIR/_next/READY" ] && [ -d "$PY_DIR/python" ] || return 0
+    works "$PY_DIR/_next/python/bin/python3" || { say "Prepared Python does not start - discarded."; rm -rf "$PY_DIR/_next"; return 0; }
+    say "Switching to Python $(cat "$PY_DIR/_next/READY") ..."
+    if mv "$PY_DIR/python" "$PY_DIR/_old"; then
+        if mv "$PY_DIR/_next/python" "$PY_DIR/python"; then
+            rm -rf "$PY_DIR/_next" "$PY_DIR/_old"
+            say "Old Python removed."
+        else
+            mv "$PY_DIR/_old" "$PY_DIR/python"
+            say "Switching failed - keeping the current Python."
+        fi
+    fi
+}
+
 # ---------------------------------------------------------------- find Python
 PY=""
+[ -n "$PYTHON_BIN" ] || switch_python
 if [ -n "$PYTHON_BIN" ]; then
     works "$PYTHON_BIN" && PY="$PYTHON_BIN" || fail "PYTHON_BIN=$PYTHON_BIN is not a working Python >= 3.10"
 fi

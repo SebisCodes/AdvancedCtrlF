@@ -12,6 +12,10 @@ rem    4. download of the latest stable official CPython (Python Software
 rem       Foundation NuGet package; SHA512 + digital signature verified)
 rem    5. fallback: system Python (py -3 / python) in its own venv
 rem
+rem  A newer Python that the program prepared in the background (python\_next\,
+rem  verified and with all packages) replaces the downloaded one at the next
+rem  start; the old one is deleted.
+rem
 rem  Usage:  start.cmd           start normally (no console window)
 rem          start.cmd debug     with console (errors are visible)
 rem          start.cmd setup     set up only
@@ -44,6 +48,7 @@ if defined PYTHON_BIN (
         goto :error
     )
 )
+if not defined PYTHON_BIN call :switch_python
 call :locate_python
 if defined PY call :check_python
 if not defined PY (
@@ -71,6 +76,32 @@ goto :eof
 
 
 rem =====================================================================
+:switch_python
+rem python\_next\ holds a newer, verified Python with all packages (prepared by the program)
+if exist "%PY_DIR%\_old" rd /s /q "%PY_DIR%\_old" 2>nul
+if not exist "%PY_DIR%\_next\READY" goto :eof
+if not exist "%PY_DIR%\python\python.exe" goto :eof
+"%PY_DIR%\_next\python\python.exe" -I -c "import sys" >nul 2>&1
+if errorlevel 1 (
+    call :log Prepared Python does not start - discarded.
+    rd /s /q "%PY_DIR%\_next" 2>nul
+    goto :eof
+)
+set /p NEXT_VER=<"%PY_DIR%\_next\READY"
+call :log Switching to Python %NEXT_VER% ...
+move "%PY_DIR%\python" "%PY_DIR%\_old" >nul 2>&1
+if errorlevel 1 ( call :log The current Python is still in use - switching at the next start. & goto :eof )
+move "%PY_DIR%\_next\python" "%PY_DIR%\python" >nul 2>&1
+if errorlevel 1 (
+    move "%PY_DIR%\_old" "%PY_DIR%\python" >nul 2>&1
+    call :log Switching failed - keeping the current Python.
+    goto :eof
+)
+rd /s /q "%PY_DIR%\_next" 2>nul
+rd /s /q "%PY_DIR%\_old" 2>nul
+call :log Old Python removed.
+goto :eof
+
 :locate_python
 if not defined PY call :find_python
 if not defined PY call :extract_archives
@@ -106,7 +137,7 @@ set "PY="
 if exist "%PY_DIR%\python.exe" ( set "PY=%PY_DIR%\python.exe" & goto :eof )
 if exist "%PY_DIR%\python\python.exe" ( set "PY=%PY_DIR%\python\python.exe" & goto :eof )
 if exist "%PY_DIR%\venv\Scripts\python.exe" ( set "PY=%PY_DIR%\venv\Scripts\python.exe" & goto :eof )
-for /f "delims=" %%F in ('dir /b /s /a-d "%PY_DIR%\python.exe" 2^>nul ^| findstr /v /i "\\Lib\\venv\\ \\_archive\\ \\_blocked\\ \\_download\\"') do (
+for /f "delims=" %%F in ('dir /b /s /a-d "%PY_DIR%\python.exe" 2^>nul ^| findstr /v /i "\\Lib\\venv\\ \\_archive\\ \\_blocked\\ \\_download\\ \\_next\\ \\_next.tmp\\ \\_old\\"') do (
     if not defined PY set "PY=%%F"
 )
 goto :eof

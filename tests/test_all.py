@@ -354,6 +354,102 @@ class DownloadIntegrityTests(Base):
             c.CONFIG_FILE = saved
 
 
+class PythonUpdateTests(Base):
+    SUMS = "\n".join([
+        "a" * 64 + "  cpython-3.14.9+20261101-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "b" * 64 + "  cpython-3.15.3+20261101-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "c" * 64 + "  cpython-3.15.10+20261101-x86_64-unknown-linux-gnu-install_only.tar.gz",
+        "d" * 64 + "  cpython-3.16.0a2+20261101-x86_64-unknown-linux-gnu-install_only.tar.gz",       # pre-release
+        "e" * 64 + "  cpython-3.15.11+20261101-x86_64-unknown-linux-gnu-freethreaded-install_only.tar.gz",
+        "f" * 64 + "  cpython-3.15.12+20261101-aarch64-apple-darwin-install_only.tar.gz",
+        "0" * 64 + "  cpython-3.15.13+20261101-x86_64-unknown-linux-gnu-install_only_stripped.tar.gz",
+    ])
+
+    def test_newest_stable_build_is_chosen(self):
+        from app import pyupdate
+        v, name, sha = pyupdate.pbs_latest(self.SUMS, "x86_64-unknown-linux-gnu")
+        self.assertEqual((v, sha), ((3, 15, 10), "c" * 64))                     # numeric, not alphabetic
+        self.assertEqual(pyupdate.pbs_latest(self.SUMS, "x86_64-unknown-linux-gnu", "3.14")[0], (3, 14, 9))
+        self.assertEqual(pyupdate.pbs_latest(self.SUMS, "aarch64-apple-darwin")[0], (3, 15, 12))
+        self.assertEqual(pyupdate.nuget_latest(["3.14.0", "3.15.2", "3.16.0-a1", "3.15.10"]), "3.15.10")
+        self.assertEqual(pyupdate.nuget_latest(["3.14.0", "3.15.2"], "3.14"), "3.14.0")
+
+    def test_sha512_of_nuget_package(self):
+        import base64
+        import hashlib
+        from app import pyupdate
+        f = self.tmp / "pkg.nupkg"
+        f.write_bytes(b"package")
+        good = base64.b64encode(hashlib.sha512(b"package").digest()).decode()
+        self.assertTrue(pyupdate.check_sha512_b64(f, good))
+        self.assertFalse(pyupdate.check_sha512_b64(f, base64.b64encode(hashlib.sha512(b"x").digest()).decode()))
+
+    def fake_python(self, folder, version):
+        """A stand-in interpreter: prints its version when the code asks for it, succeeds otherwise."""
+        exe = folder / "python" / "bin" / "python3"
+        exe.parent.mkdir(parents=True)
+        exe.write_text(f"#!/bin/sh\nfor a in \"$@\"; do case \"$a\" in *print*) echo {version}; exit 0;; esac; done\n"
+                       "exit 0\n")
+        exe.chmod(0o755)
+        return exe
+
+    @unittest.skipIf(os.name == "nt", "the stand-in interpreter is a shell script")
+    def test_prepare_verifies_checksum_and_installs_into_next(self):
+        import hashlib
+        import tarfile
+        from app import net, pyupdate
+        root = self.tmp / "prog-py"
+        (root / "python" / "python").mkdir(parents=True)
+        (root / "tools").mkdir()
+        (root / "tools" / "ensure_deps.py").write_text("")
+        build = self.tmp / "build"
+        self.fake_python(build, "99.0.0")
+        archive = self.tmp / "py.tar.gz"
+        with tarfile.open(archive, "w:gz") as tf:
+            tf.add(build / "python", arcname="python")
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        name = "cpython-99.0.0+20991231-x86_64-unknown-linux-gnu-install_only.tar.gz"
+        saved = (pyupdate.latest, pyupdate.is_managed, net.download)
+        try:
+            pyupdate.is_managed = lambda r, prefix=None: True
+            net.download = lambda url, dest, *a, **k: shutil.copyfile(archive, dest)
+            pyupdate.latest = lambda series="": ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": "0" * 64})
+            with self.assertRaises(pyupdate.PythonUpdateError):                 # wrong checksum
+                pyupdate.prepare(root)
+            self.assertIsNone(pyupdate.prepared(root))
+            self.assertFalse((root / "python" / "_next.tmp").exists())
+            pyupdate.latest = lambda series="": ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": sha})
+            self.assertEqual(pyupdate.prepare(root), "99.0.0")
+            self.assertEqual(pyupdate.prepared(root), "99.0.0")
+            self.assertTrue((root / "python" / "_next" / "python" / "bin" / "python3").is_file())
+            self.assertFalse((root / "python" / "_next.lock").exists())
+            pyupdate.latest = lambda series="": ((1, 0, 0), {})                  # older than the running one
+            shutil.rmtree(root / "python" / "_next")
+            self.assertIsNone(pyupdate.prepare(root))
+        finally:
+            pyupdate.latest, pyupdate.is_managed, net.download = saved
+
+    @unittest.skipIf(os.name == "nt", "start.sh is the launcher for Linux and macOS")
+    def test_launcher_switches_to_prepared_python_and_deletes_the_old_one(self):
+        import subprocess
+        root = self.tmp / "prog-launch"
+        (root / "tools").mkdir(parents=True)
+        shutil.copy(ROOT / "start.sh", root / "start.sh")
+        (root / "tools" / "ensure_deps.py").write_text("")
+        old = self.fake_python(root / "python", "3.15.1")
+        (old.parent / "OLD").write_text("old")
+        new = self.fake_python(root / "python" / "_next", "3.15.2")
+        (new.parent / "NEW").write_text("new")
+        (root / "python" / "_next" / "READY").write_text("3.15.2\n")
+        r = subprocess.run(["bash", str(root / "start.sh"), "--setup"], capture_output=True, text=True, timeout=60,
+                           env={k: v for k, v in os.environ.items() if k != "PYTHON_BIN"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertTrue((root / "python" / "python" / "bin" / "NEW").exists())
+        self.assertFalse((root / "python" / "_next").exists())
+        self.assertFalse((root / "python" / "_old").exists())
+        self.assertIn("Switching to Python 3.15.2", r.stdout)
+
+
 class UpdaterTests(Base):
     KEY = bytes(range(32))                       # test key only - releases use a private key
 
