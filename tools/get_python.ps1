@@ -30,6 +30,16 @@ try {
     $versions = (Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "$api/index.json").versions |
         Where-Object { $_ -match '^\d+\.\d+\.\d+$' }                     # stable releases only
     if ($Version) { $versions = $versions | Where-Object { $_ -like "$Version*" } }
+    else {
+        # never newer than the series the locked packages have wheels for (requirements.txt)
+        $req = Join-Path (Split-Path -Parent $PSScriptRoot) "requirements.txt"
+        $cap = if (Test-Path $req) { Select-String -LiteralPath $req -Pattern '^# python-max: 3\.(\d+)\s*$' |
+            Select-Object -First 1 } else { $null }
+        if ($cap) {
+            $maxMinor = [int]$cap.Matches[0].Groups[1].Value
+            $versions = $versions | Where-Object { ([version]$_).Minor -le $maxMinor }
+        }
+    }
     $ver = $versions | Sort-Object { [version]$_ } -Descending | Select-Object -First 1
     if (-not $ver) { throw "No matching Python version found." }
 

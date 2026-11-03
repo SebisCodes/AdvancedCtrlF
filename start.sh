@@ -117,6 +117,13 @@ download_python() {
     urls="$(printf '%s\n' "$urls" | grep -E "/cpython-[0-9]+\.[0-9]+\.[0-9]+(\+|%2B)[0-9]+-${triple}-install_only\.tar\.gz$" || true)"
     if [ -n "$PY_VERSION" ]; then
         urls="$(printf '%s\n' "$urls" | grep -E "/cpython-${PY_VERSION//./\\.}(\.|\+|%2B)" || true)"
+    else
+        # never newer than the series the locked packages have wheels for (requirements.txt)
+        pymax="$(sed -n 's/^# python-max: 3\.\([0-9][0-9]*\)\r*$/\1/p' "$ROOT/requirements.txt" | head -1)"
+        if [ -n "$pymax" ]; then
+            urls="$(printf '%s\n' "$urls" | awk -v m="$pymax" 'match($0, /\/cpython-3\.[0-9]+\./) {
+                if (substr($0, RSTART + 11, RLENGTH - 12) + 0 <= m + 0) print }')"
+        fi
     fi
     [ -n "$urls" ] || { say "No matching Python found in the release."; return 1; }
     url="$(printf '%s\n' "$urls" | sed -E 's#.*/cpython-([0-9.]+)(\+|%2B).*#\1 &#' | sort -t. -k1,1n -k2,2n -k3,3n | tail -1 | cut -d' ' -f2)"

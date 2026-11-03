@@ -3,6 +3,7 @@
 Run:  python -I tests/test_all.py   (or: python -m unittest discover tests)
 """
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -374,6 +375,45 @@ class PythonUpdateTests(Base):
         self.assertEqual(pyupdate.nuget_latest(["3.14.0", "3.15.2", "3.16.0-a1", "3.15.10"]), "3.15.10")
         self.assertEqual(pyupdate.nuget_latest(["3.14.0", "3.15.2"], "3.14"), "3.14.0")
 
+    def test_newest_python_is_capped_by_the_locked_packages(self):
+        from app import pyupdate
+        self.assertEqual(pyupdate.pbs_latest(self.SUMS, "x86_64-unknown-linux-gnu", "", 14)[0], (3, 14, 9))
+        self.assertEqual(pyupdate.nuget_latest(["3.14.0", "3.15.2", "3.16.1"], "", 15), "3.15.2")
+        self.assertEqual(pyupdate.nuget_latest(["3.15.2", "3.16.1"], "3.16", 15), "3.16.1")  # PY_VERSION wins
+        root = self.tmp / "capped"
+        root.mkdir()
+        self.assertIsNone(pyupdate.python_max(root))
+        (root / "requirements.txt").write_text("# python-max: 3.14\nx==1 --hash=sha256:00\n")
+        self.assertEqual(pyupdate.python_max(root), 14)
+        self.assertEqual(pyupdate.python_max(ROOT), int(re.search(
+            r"^# python-max: 3\.(\d+)$", (ROOT / "requirements.txt").read_text(), re.M).group(1)))
+
+    def test_requirements_are_locked_with_hashes(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("lock_deps", ROOT / "tools" / "lock_deps.py")
+        lock = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(lock)
+        text = (ROOT / "requirements.txt").read_text()
+        entries = re.findall(r"^([A-Za-z0-9_.-]+)==(\S+) \\$", text, re.M)
+        names = {n.lower().replace("_", "-") for n, _ in entries}
+        wanted = re.findall(r"^([A-Za-z0-9_.-]+)", (ROOT / "requirements.in").read_text(), re.M)
+        self.assertTrue({w.lower().replace("_", "-") for w in wanted} <= names)
+        blocks = re.split(r"^(?=[A-Za-z])", text, flags=re.M)[1:]
+        self.assertEqual(len(blocks), len(entries))
+        self.assertTrue(all(re.search(r"--hash=sha256:[0-9a-f]{64}", b) for b in blocks))
+        self.assertRegex(text, r"(?m)^# python-max: 3\.\d+$")
+        # coverage of a Python series: per-version wheels must exist on Windows, Linux and macOS
+        wheels = ["n-1-cp314-cp314-win_amd64.whl", "n-1-cp314-cp314-manylinux_2_28_x86_64.whl",
+                  "n-1-cp314-cp314-macosx_11_0_arm64.whl", "n-1-cp315-cp315-win_amd64.whl",
+                  "n-1-cp315-cp315-manylinux_2_28_x86_64.whl", "n-1-cp315-cp315t-macosx_11_0_arm64.whl"]
+        self.assertEqual(lock.max_series(wheels), 14)
+        self.assertIsNone(lock.max_series(["n-1-py3-none-any.whl"]))
+        self.assertIsNone(lock.max_series(["n-1-cp39-abi3-win_amd64.whl", "n-1-cp39-abi3-manylinux_2_28_x86_64.whl",
+                                           "n-1-cp39-abi3-macosx_13_0_universal2.whl"]))
+        self.assertEqual(lock.requires_max("<3.16,>=3.10"), 15)
+        self.assertEqual(lock.requires_max("<=3.14"), 14)
+        self.assertIsNone(lock.requires_max(">=3.9"))
+
     def test_sha512_of_nuget_package(self):
         import base64
         import hashlib
@@ -413,17 +453,17 @@ class PythonUpdateTests(Base):
         try:
             pyupdate.is_managed = lambda r, prefix=None: True
             net.download = lambda url, dest, *a, **k: shutil.copyfile(archive, dest)
-            pyupdate.latest = lambda series="": ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": "0" * 64})
+            pyupdate.latest = lambda series="", upto=None: ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": "0" * 64})
             with self.assertRaises(pyupdate.PythonUpdateError):                 # wrong checksum
                 pyupdate.prepare(root)
             self.assertIsNone(pyupdate.prepared(root))
             self.assertFalse((root / "python" / "_next.tmp").exists())
-            pyupdate.latest = lambda series="": ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": sha})
+            pyupdate.latest = lambda series="", upto=None: ((99, 0, 0), {"kind": "pbs", "name": name, "sha256": sha})
             self.assertEqual(pyupdate.prepare(root), "99.0.0")
             self.assertEqual(pyupdate.prepared(root), "99.0.0")
             self.assertTrue((root / "python" / "_next" / "python" / "bin" / "python3").is_file())
             self.assertFalse((root / "python" / "_next.lock").exists())
-            pyupdate.latest = lambda series="": ((1, 0, 0), {})                  # older than the running one
+            pyupdate.latest = lambda series="", upto=None: ((1, 0, 0), {})                  # older than the running one
             shutil.rmtree(root / "python" / "_next")
             self.assertIsNone(pyupdate.prepare(root))
         finally:

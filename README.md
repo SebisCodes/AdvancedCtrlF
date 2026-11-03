@@ -39,8 +39,14 @@ aside as `python/_blocked` and downloads the signed official build instead.
 **macOS:** the current Qt (PySide6) needs **macOS 14 Sonoma or newer**. On older versions set `PY_VERSION=3.12` in
 `start.sh` so that an older PySide6 can be installed.
 
-Set `PY_VERSION=3.13` in the launcher to pin a version. Packages from `requirements.txt` are installed as prebuilt
-wheels only (nothing is compiled) and only re-installed when `requirements.txt` changes.
+Set `PY_VERSION=3.13` in the launcher to pin a version. Without it the launcher takes the newest stable Python,
+but never one newer than `# python-max` in `requirements.txt` (the newest series all packages have prebuilt
+wheels for). Packages from `requirements.txt` are installed in exactly the listed versions, as prebuilt wheels
+only (nothing is compiled), and only re-installed when `requirements.txt` changes.
+
+For maintainers: the allowed version ranges are in `requirements.in`; `python -I tools/lock_deps.py` resolves
+them and writes `requirements.txt` with exact versions and the SHA-256 of every wheel for Windows, Linux and
+macOS. Test and commit both files.
 
 ## Supported files
 
@@ -204,9 +210,11 @@ The JSON files in `data/index/` are plain and documented by example – each pas
     SHA-256 in `app/ocr_checksums.py`. Packs copied from a local Tesseract installation are used as they are.
   - Meaning model: pinned to a fixed revision; each file must match its SHA-256 in `app/semantic.py`.
   - Updates: valid Ed25519 signature and matching SHA-256 (see *Updates*).
-  - Python packages: installed by pip from PyPI, which checks each file against the hash published by
-    PyPI. Versions are not pinned, so that new Python versions get matching packages; an existing
-    installation only installs packages again when `requirements.txt` changes.
+  - Python packages: exact versions, installed by pip with `--require-hashes` – every downloaded wheel must
+    match a SHA-256 recorded in `requirements.txt` (dependencies of dependencies included), so PyPI cannot
+    deliver a different file or a newer version unnoticed. New package versions only arrive with a program
+    update, after the tests ran with them. The background Python updates stay within `# python-max`.
+  - pip itself (only for a Python that comes without it): official wheel from PyPI, SHA-256-verified.
   - Documents added from a link are user content and are not checked – they are only read, never run.
 - Office files that can contain macros (.docm, .xlsm, .pptm, .doc, .xls, .ppt, …) are never opened from the
   program – only their folder is shown
@@ -217,6 +225,12 @@ The JSON files in `data/index/` are plain and documented by example – each pas
   traversal, links, or unbounded sizes
 - Documents are copied without execute permission; executable file types are never launched
 - External programs are started with argument lists, never through a shell
+
+What remains: like every document search, the program parses untrusted files with libraries (PyMuPDF for
+PDF and images, Qt, openpyxl, xlrd, Python's XML and ZIP modules). A crafted file could hit an unknown bug in
+one of them; updates keep these libraries current. Program updates are trusted because they are signed with
+the developer's key – if you prefer to update deliberately, switch off *Menu → Automatic updates* and use
+*Check for updates now* when you want; each archive can also be checked by hand against `SHA256SUMS`.
 
 ## Tests
 

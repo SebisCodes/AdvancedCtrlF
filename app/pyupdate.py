@@ -15,7 +15,8 @@ program and continue when its window is closed:
   4. it is unpacked into python/_next/, the packages from requirements.txt are installed
      into it and loaded once; only then the file python/_next/READY is written.
 The launcher switches to python/_next/ at the next start and deletes the old Python.
-PY_VERSION (e.g. 3.13), if set, limits updates to that series.
+PY_VERSION (e.g. 3.13), if set, limits updates to that series; otherwise no Python newer than
+"# python-max" in requirements.txt is chosen - the newest series the locked packages have wheels for.
 """
 from __future__ import annotations
 
@@ -70,7 +71,20 @@ def version_tuple(text: str) -> tuple[int, int, int] | None:
     return tuple(int(x) for x in m.groups()) if m else None
 
 
-def _series_ok(version: tuple[int, int, int], series: str) -> bool:
+def python_max(root: Path) -> int | None:
+    """Newest 3.X the locked packages have wheels for: "# python-max: 3.15" in requirements.txt -> 15."""
+    try:
+        m = re.search(r"^# python-max: 3\.(\d+)\s*$", (root / "requirements.txt").read_text(encoding="utf-8"),
+                      re.M)
+    except OSError:
+        return None
+    return int(m.group(1)) if m else None
+
+
+def _series_ok(version: tuple[int, int, int], series: str, upto: int | None = None) -> bool:
+    """In the PY_VERSION series if one is set; otherwise not newer than 3.<upto>."""
+    if not series and upto is not None and version[:2] > (3, upto):
+        return False
     return not series or ".".join(map(str, version)).startswith(series.rstrip(".") + ".") \
         or ".".join(map(str, version)) == series
 
@@ -95,7 +109,7 @@ def pbs_triple() -> str | None:
     return f"{arch}-apple-darwin" if sys.platform == "darwin" else f"{arch}-unknown-linux-gnu"
 
 
-def pbs_latest(sums: str, triple: str, series: str = "") -> tuple[tuple[int, int, int], str, str] | None:
+def pbs_latest(sums: str, triple: str, series: str = "", upto: int | None = None) -> tuple[tuple[int, int, int], str, str] | None:
     """(version, file name, SHA-256) of the newest stable install_only build in SHA256SUMS."""
     pat = re.compile(rf"^cpython-(\d+)\.(\d+)\.(\d+)\+(\d+)-{re.escape(triple)}-install_only\.tar\.gz$")
     best = None
@@ -107,7 +121,7 @@ def pbs_latest(sums: str, triple: str, series: str = "") -> tuple[tuple[int, int
         if not m:
             continue
         v = tuple(int(x) for x in m.groups()[:3])
-        if _series_ok(v, series) and (best is None or v > best[0]):
+        if _series_ok(v, series, upto) and (best is None or v > best[0]):
             best = (v, parts[1], parts[0])
     return best
 
@@ -131,9 +145,9 @@ def nuget_id() -> str:
     return "pythonarm64" if platform.machine().upper() == "ARM64" else "python"
 
 
-def nuget_latest(versions: list[str], series: str = "") -> str | None:
+def nuget_latest(versions: list[str], series: str = "", upto: int | None = None) -> str | None:
     stable = [(version_tuple(v), v) for v in versions if version_tuple(v)]
-    stable = [(t, v) for t, v in stable if _series_ok(t, series)]
+    stable = [(t, v) for t, v in stable if _series_ok(t, series, upto)]
     return max(stable)[1] if stable else None
 
 
@@ -187,12 +201,12 @@ def _sha256(path: Path) -> str:
     return h.hexdigest()
 
 
-def latest(series: str = "") -> tuple[tuple[int, int, int], dict]:
-    """Newest available version and what is needed to fetch it."""
+def latest(series: str = "", upto: int | None = None) -> tuple[tuple[int, int, int], dict]:
+    """Newest available version (not newer than 3.<upto>) and what is needed to fetch it."""
     if os.name == "nt":
         pkg_id = nuget_id()
         versions = json.loads(_get(f"{NUGET}/{pkg_id}/index.json")).get("versions", [])
-        v = nuget_latest(versions, series)
+        v = nuget_latest(versions, series, upto)
         if v is None:
             raise PythonUpdateError("no matching Python version found")
         return version_tuple(v), {"kind": "nuget", "id": pkg_id, "version": v}
@@ -200,7 +214,7 @@ def latest(series: str = "") -> tuple[tuple[int, int, int], dict]:
     if triple is None:
         raise PythonUpdateError(f"architecture {platform.machine()} is not supported")
     sums = _get(f"{PBS}/latest/download/SHA256SUMS").decode("utf-8", "replace")
-    found = pbs_latest(sums, triple, series)
+    found = pbs_latest(sums, triple, series, upto)
     if found is None:
         raise PythonUpdateError("no matching Python version found")
     return found[0], {"kind": "pbs", "name": found[1], "sha256": found[2]}
@@ -211,7 +225,7 @@ def check(root: Path, series: str | None = None) -> str | None:
     series = os.environ.get("PY_VERSION", "") if series is None else series
     if not is_managed(root) or prepared(root):
         return None
-    version, _ = latest(series)
+    version, _ = latest(series, python_max(root))
     return ".".join(map(str, version)) if version > sys.version_info[:3] else None
 
 
@@ -248,7 +262,7 @@ def prepare(root: Path, progress=lambda msg: None, series: str | None = None) ->
     waiting = prepared(root)
     if waiting and version_tuple(waiting) and version_tuple(waiting) > current:
         return waiting
-    version, how = latest(series)
+    version, how = latest(series, python_max(root))
     if version <= current:
         progress(f"Python {'.'.join(map(str, current))} is the newest version.")
         return None
