@@ -414,6 +414,25 @@ class PythonUpdateTests(Base):
         self.assertEqual(lock.requires_max("<=3.14"), 14)
         self.assertIsNone(lock.requires_max(">=3.9"))
 
+    def test_verify_download_checks_signature_and_checksum(self):
+        import hashlib
+        import importlib.util
+        from app import ed25519
+        spec = importlib.util.spec_from_file_location("verify_download", ROOT / "tools" / "verify_download.py")
+        vd = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(vd)
+        secret = bytes(range(32))
+        public = ed25519.public_key(secret)
+        archive = self.tmp / "AdvancedCtrlF-9.9.9.zip"
+        archive.write_bytes(b"release")
+        sums = f"{hashlib.sha256(b'release').hexdigest()}  {archive.name}\n".encode()
+        sig = ed25519.sign(secret, sums).hex()
+        self.assertEqual(vd.check(archive, sums, sig, public), "")
+        self.assertIn("SIGNATURE", vd.check(archive, sums + b" ", sig, public))
+        self.assertIn("SIGNATURE", vd.check(archive, sums, sig, ed25519.public_key(bytes(32))))
+        archive.write_bytes(b"tampered")
+        self.assertIn("MISMATCH", vd.check(archive, sums, sig, public))
+
     def test_sha512_of_nuget_package(self):
         import base64
         import hashlib

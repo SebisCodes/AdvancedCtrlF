@@ -175,8 +175,12 @@ How an update is checked:
    `config/` and `python/` are never touched. If anything fails, the backup is restored. The launcher then
    installs changed packages.
 
-A program folder that is a Git checkout is never changed (update it with `git pull`). Checksums of all
-release archives, for manual downloads: `https://advanced-ctrl-f.giit.ch/updates/SHA256SUMS`.
+A program folder that is a Git checkout is never changed (update it with `git pull`).
+
+Manual downloads: `https://advanced-ctrl-f.giit.ch/updates/SHA256SUMS` lists the SHA-256 of every release
+archive and is signed with the same key (`SHA256SUMS.sig`). `python3 tools/verify_download.py
+AdvancedCtrlF-<version>.zip` (run from a copy you already trust, e.g. a Git checkout) checks the signature
+and the archive.
 
 ## Folder layout
 
