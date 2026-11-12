@@ -6,7 +6,8 @@ best matching passages ranked in a table – with page / slide / line / cell, a 
 
 - Works on **Windows, macOS and Linux**, fully portable (everything lives in the program folder)
 - Ships its own launcher that finds – or automatically downloads – a local Python
-- No admin rights, no installer, no background services, no network access except for the optional downloads
+- No admin rights, no installer, no background services; network access only for the first-start setup, the
+  downloads you choose and a daily update check (*Menu → Automatic updates* switches it off)
 
 ## Quick start
 
@@ -52,7 +53,7 @@ macOS. Test and commit both files.
 
 | Type | Location shown |
 |------|----------------|
-| PDF, XPS – incl. **OCR** for scanned pages with automatic **German/English** detection | page, line |
+| PDF, XPS – incl. **OCR** for scanned pages with automatic **language** detection | page, line |
 | Word (`.docx`, `.docm`) – paragraphs, tables, headers/footers, footnotes, comments, image alt texts, captions | page (approx.) |
 | PowerPoint (`.pptx`) – text, tables, speaker notes, **image captions** and alt texts | slide |
 | Excel (`.xlsx`, `.xls`), OpenDocument spreadsheet (`.ods`) | sheet + cell, e.g. `Sales!B7` |
@@ -83,11 +84,11 @@ are recognised as a whole. Tiny images such as icons are skipped and a picture t
 (like a logo on every slide) is read and listed only once.
 
 **OCR** does not need a separate Tesseract installation: PyMuPDF ships the engine, only **language packs** are
-needed. *Menu → Languages and packs* lists 49 languages – Latin script (English, German, French, Spanish, Italian,
+needed. *Menu → Languages and packs* lists 51 packs for 50 languages – Latin script (English, German, French, Spanish, Italian,
 Portuguese, Catalan, Dutch, Afrikaans, Polish, Czech, Slovak, Slovenian, Croatian, Swedish, Danish, Norwegian,
 Finnish, Estonian, Latvian, Lithuanian, Hungarian, Romanian, Turkish, Indonesian, Vietnamese), Russian, Ukrainian,
 Bulgarian, Greek, Arabic, Persian, Urdu, Hebrew, Hindi, Marathi, Nepali, Bengali, Punjabi, Gujarati, Odia, Tamil,
-Telugu, Kannada, Malayalam, Sinhala, Thai, Japanese, Korean and Chinese simplified/traditional. Tick the ones you
+Telugu, Kannada, Malayalam, Sinhala, Thai, Japanese, Korean and Chinese (one pack each for simplified and traditional). Tick the ones you
 need, untick to delete them. On the **first start** this dialog opens with English, German and the system language
 preselected. Packs from an existing Tesseract installation are copied instead of downloaded.
 
@@ -100,7 +101,7 @@ faster.
 
 Case, accents and umlauts (*Größe = Groesse = Grosse*), **word forms in the language of each document**
 (*contract / contracts*, *Vertrag / Verträge*, *contrat / contrats*, *договор / договора* – Snowball stemmers for
-30 languages, switchable per language in *Menu → Languages and packs*), typos (*warrenty*) and parts of compound
+28 languages, switchable per language in *Menu → Languages and packs*), typos (*warrenty*) and parts of compound
 words (*vertrag* finds *Arbeitsvertrag*) are handled automatically. Chinese, Japanese, Korean and Thai, which are
 written without spaces between words, are indexed as overlapping pairs of characters, so any word inside a sentence
 is found.
@@ -229,6 +230,8 @@ The JSON files in `data/index/` are plain and documented by example – each pas
   traversal, links, or unbounded sizes
 - Documents are copied without execute permission; executable file types are never launched
 - External programs are started with argument lists, never through a shell
+- The copies in `data/documents/` and the index in `data/index/` are stored unencrypted – protect the program
+  folder like the originals (e.g. on an encrypted drive). Deleting the program folder removes them.
 
 What remains: like every document search, the program parses untrusted files with libraries (PyMuPDF for
 PDF and images, Qt, openpyxl, xlrd, Python's XML and ZIP modules). A crafted file could hit an unknown bug in
