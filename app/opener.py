@@ -95,6 +95,12 @@ def _win_paths(*rel: str) -> str | None:
     return None
 
 
+def _for_log(args: list[str]) -> list[str]:
+    """The command for the log without the text of a hit: a text fragment (#:~:text=...) holds
+    words from the document, and the log goes into copied diagnostics."""
+    return [a.split("#:~:text=", 1)[0] + "#:~:text=..." if "#:~:text=" in a else a for a in args]
+
+
 def _spawn(args: list[str]) -> bool:
     try:
         kw = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "stdin": subprocess.DEVNULL}
@@ -103,10 +109,10 @@ def _spawn(args: list[str]) -> bool:
         else:
             kw["start_new_session"] = True
         subprocess.Popen(args, **kw)
-        log.info("Started %s", args)
+        log.info("Started %s", _for_log(args))
         return True
     except OSError as e:
-        log.warning("Could not start %s: %s", args, e)
+        log.warning("Could not start %s: %s", _for_log(args), e)
         return False
 
 

@@ -1179,5 +1179,13 @@ class StoreAndSearchTests(Base):
         self.assertTrue(all(ix.docs[h.doc_id]["name"] != "scan.pdf" for h in hits))
 
 
+class LogPrivacyTests(unittest.TestCase):
+    def test_hit_text_stays_out_of_the_log(self):
+        # Copied diagnostics include the log; a hit's text fragment holds words from the document.
+        from app.opener import _for_log
+        self.assertEqual(_for_log(["browser", "file:///a.html#:~:text=private%20word"]), ["browser", "file:///a.html#:~:text=..."])
+        self.assertEqual(_for_log(["viewer", "-p", "3", "/a.pdf"]), ["viewer", "-p", "3", "/a.pdf"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
