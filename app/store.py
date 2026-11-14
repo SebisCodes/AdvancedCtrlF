@@ -277,16 +277,18 @@ class Store:
                 return [self._error_doc(archive, f"{label} › ", f"Archive could not be read: {e}")]
             tops = [p for p in Path(tmp).iterdir()]
             root = tops[0] if len(tops) == 1 and tops[0].is_dir() else Path(tmp)   # "repo-main/" folder
+            # resolved once: temp folders are reached through links on macOS (/var) and Windows (8.3 names)
+            root = root.resolve()
             start = (root / subpath).resolve() if subpath else root
-            if start != root.resolve() and root.resolve() not in start.parents:
+            if start != root and root not in start.parents:
                 return [self._error_doc(archive, f"{label} › ", f"Folder {subpath!r} is outside the repository")]
             if not start.exists():
                 return [self._error_doc(archive, f"{label} › ", f"Folder {subpath!r} not found in the repository")]
             if start.is_file():
-                rel = start.parent.relative_to(root.resolve()).as_posix()
+                rel = start.parent.relative_to(root).as_posix()
                 return self.add_path(start, ctx, f"{label} › " + ("" if rel == "." else f"{rel}/"), 0, extra,
                                      budget=budget)
-            return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root.resolve(), budget=budget)
+            return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root, budget=budget)
 
     def _add_file(self, src: Path, ctx: Context, display_prefix: str, extra: dict | None = None,
                   zone: str | None = None) -> dict:
