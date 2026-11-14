@@ -24,8 +24,11 @@ def parse(url: str) -> dict:
         raise ExtractError("Not a web link (https://…)")
     m = _GITHUB.match(url)
     if m and m["repo"] not in ("orgs", "settings", "topics", "search", "marketplace", "features"):
+        path = urllib.parse.unquote(m["path"] or "").replace("\\", "/").strip("/")
+        if "\x00" in path or any(part in (".", "..") for part in path.split("/")):
+            raise ExtractError("The link contains an invalid folder path")
         return {"kind": "github", "owner": m["owner"], "repo": m["repo"], "ref": m["ref"] or "",
-                "path": urllib.parse.unquote(m["path"] or "").strip("/"), "mode": m["mode"] or "", "url": url}
+                "path": path, "mode": m["mode"] or "", "url": url}
     return {"kind": "file", "url": url}
 
 

@@ -163,7 +163,7 @@ def _authenticode_ok(exe: Path) -> bool:
     script = ("$s = Get-AuthenticodeSignature -LiteralPath $env:ACF_FILE; "
               "if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Subject -notmatch 'Python Software Foundation') "
               "{ exit 1 }")
-    r = subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+    r = subprocess.run([net.powershell_exe(), "-NoProfile", "-NonInteractive", "-Command", script],
                        env=dict(os.environ, ACF_FILE=str(exe)), capture_output=True, timeout=120,
                        creationflags=NO_WINDOW)
     return r.returncode == 0

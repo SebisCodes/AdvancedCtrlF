@@ -169,12 +169,18 @@ How an update is checked:
    address, size, SHA-256). It is signed with the maintainer's Ed25519 key; the program contains only the
    public key and rejects any description without a valid signature – so even someone with access to the
    web server cannot publish an update.
-2. Only a higher version is accepted, and only an archive below `updates/` on that site.
+2. Only a higher version is accepted, and only an archive below `updates/` on that site. The newest version
+   ever offered is remembered: if the server later offers an older one than that or than the installed
+   version (e.g. an old, genuinely signed description played back by an attacker), the check reports an
+   error instead of "up to date". (The description has no expiry date: someone controlling the server can
+   still keep showing the newest description you already know, i.e. hold back a newer release.)
 3. Size and SHA-256 of the downloaded archive must match the signed values, and the archive must contain
-   exactly that version of the program.
-4. When updating, the program files are moved to `data/updates/backup-<version>/` and replaced; `data/`,
-   `config/` and `python/` are never touched. If anything fails, the backup is restored. The launcher then
-   installs changed packages.
+   exactly that version of the program. Archive and signed description wait in `data/updates/staged-<version>/`.
+4. When updating, signature, checksum and version (higher than the installed one) are checked again and the
+   archive is unpacked afresh – nothing in `data/updates/` is trusted just because it is there. The program
+   files are moved to `data/updates/backup-<version>/` and replaced; `data/`, `config/` and `python/` are
+   never touched. If anything fails, the backup is restored; if the computer is switched off in the middle,
+   the launcher rolls the update back at the next start. The launcher then installs changed packages.
 
 A program folder that is a Git checkout is never changed (update it with `git pull`).
 
@@ -221,15 +227,26 @@ The JSON files in `data/index/` are plain and documented by example – each pas
     update, after the tests ran with them. The background Python updates stay within `# python-max`.
   - pip itself (only for a Python that comes without it): official wheel from PyPI, SHA-256-verified.
   - Documents added from a link are user content and are not checked – they are only read, never run.
-- Office files that can contain macros (.docm, .xlsm, .pptm, .doc, .xls, .ppt, …) are never opened from the
-  program – only their folder is shown
+- Office files that can contain macros (.docm, .xlsm, .pptm, .doc, .xls, .ppt, …) and OpenDocument files
+  that contain macros or scripts are never opened from the program – only their folder is shown
 - On Windows the copies in `data/documents/` keep the "downloaded from the internet" mark (Mark of the Web) of
   the original, of the archive they came from, or of the link they were downloaded from – Office and PDF
   readers then use protected view
-- XML with entity definitions is rejected (no XXE / "billion laughs"); archives are extracted without path
-  traversal, links, or unbounded sizes
+- XML with entity definitions is rejected in every encoding (no XXE / "billion laughs"); archives are
+  extracted without path traversal or links, and with one size limit for an archive and everything nested in
+  it; parts of Office files, OpenDocument files and EPUBs are unpacked in blocks with a size limit (for Excel
+  files the real size of every part is measured before openpyxl reads them). ZIP entries compressed with
+  bzip2 or LZMA are skipped – Python decompresses those without an output limit
+- Links to a GitHub sub folder cannot reach outside the downloaded repository (`..` is refused)
 - Documents are copied without execute permission; executable file types are never launched
-- External programs are started with argument lists, never through a shell
+- On macOS and Linux, `data/` and `config/` are readable by your user only, and so are the copies of documents
+- External programs are started with argument lists, never through a shell; Windows tools (PowerShell, cmd,
+  explorer, chcp, tar, …) are called with their full system path, never looked up in the current folder.
+  `start.cmd` treats folder and file names as text, so a folder name like `a & calc` cannot run anything
+- The Windows download fallback (PowerShell) gives your Windows sign-in only to the company proxy, never to
+  the server of a link, and stops at the size limit
+- Addresses of downloaded links are logged without query string (no access tokens of pre-signed links in
+  `data/advanced_ctrl_f.log` or in copied diagnostics)
 - The copies in `data/documents/` and the index in `data/index/` are stored unencrypted – protect the program
   folder like the originals (e.g. on an encrypted drive). Deleting the program folder removes them.
 

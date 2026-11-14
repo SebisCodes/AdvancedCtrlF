@@ -151,9 +151,48 @@ system_venv() {
     "$sys_py" -m venv "$PY_DIR/venv" || { say "Could not create venv (package python3-venv missing?)"; return 1; }
 }
 
+recover_update() {
+    # data/updates/applying exists only while an update replaces the program files: if it is
+    # still there, that was interrupted -> back to the previous version (written by app/updater.py:
+    # line 1 = backup folder, then "old <name>" / "new <name>"). Files are put back with one
+    # rename each (a launcher is never missing; bash keeps reading the start.sh it opened). Any
+    # error stops here and keeps the journal, so the next start tries again.
+    local upd="$ROOT/data/updates" first="" backup="" state name
+    [ -f "$upd/applying" ] || return 0
+    say "An interrupted update is rolled back ..."
+    local stop="Rolling back the interrupted update failed - close programs using this folder and start again."
+    {
+        IFS= read -r first || true
+        first="${first%$'\r'}"
+        case "$first" in *..*|backup-*[!A-Za-z0-9._+-]*) ;; backup-?*) [ -d "$upd/$first" ] && backup="$upd/$first" ;; esac
+        while read -r state name; do
+            name="${name%$'\r'}"
+            case "$name" in ""|*[!A-Za-z0-9._+-]*|.|..|data|config|python|.git) continue ;; esac
+            if [ "$state" = old ] && [ -n "$backup" ] && { [ -e "$backup/$name" ] || [ -L "$backup/$name" ]; }; then
+                if [ -d "$backup/$name" ] && [ ! -L "$backup/$name" ]; then
+                    rm -rf "${ROOT:?}/$name" || fail "$stop"
+                    { [ ! -e "$ROOT/$name" ] && [ ! -L "$ROOT/$name" ]; } || fail "$stop"
+                    mv "$backup/$name" "$ROOT/$name" || fail "$stop"
+                else
+                    if [ -d "$ROOT/$name" ] && [ ! -L "$ROOT/$name" ]; then rm -rf "${ROOT:?}/$name" || fail "$stop"; fi
+                    mv -f "$backup/$name" "$ROOT/$name" || fail "$stop"     # rename: replaces the file in one step
+                fi
+            elif [ "$state" = new ]; then
+                rm -rf "${ROOT:?}/$name" || fail "$stop"
+                { [ ! -e "$ROOT/$name" ] && [ ! -L "$ROOT/$name" ]; } || fail "$stop"
+            fi
+        done
+    } < "$upd/applying"
+    rm -f "$upd/applying"
+}
+
 switch_python() {
     # python/_next/ holds a newer, verified Python with all packages (prepared by the program)
-    rm -rf "$PY_DIR/_old"                                    # left over from an earlier switch
+    if [ -d "$PY_DIR/_old" ] && [ ! -d "$PY_DIR/python" ]; then   # a switch was interrupted between its two moves
+        mv "$PY_DIR/_old" "$PY_DIR/python" || fail "The previous Python in $PY_DIR/_old could not be put back."
+        say "Restored the previous Python (a switch had been interrupted)."
+    fi
+    [ -d "$PY_DIR/python" ] && rm -rf "$PY_DIR/_old"         # left over from an earlier switch
     [ -f "$PY_DIR/_next/READY" ] && [ -d "$PY_DIR/python" ] || return 0
     works "$PY_DIR/_next/python/bin/python3" || { say "Prepared Python does not start - discarded."; rm -rf "$PY_DIR/_next"; return 0; }
     say "Switching to Python $(cat "$PY_DIR/_next/READY") ..."
@@ -169,6 +208,7 @@ switch_python() {
 }
 
 # ---------------------------------------------------------------- find Python
+recover_update
 PY=""
 [ -n "$PYTHON_BIN" ] || switch_python
 if [ -n "$PYTHON_BIN" ]; then

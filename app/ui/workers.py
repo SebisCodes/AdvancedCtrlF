@@ -62,6 +62,7 @@ class UpdateWorker(QObject):
         from .. import updater
         try:
             manifest = updater.fetch_manifest()
+            updater.remember_version(cfg.ROOT, manifest)     # an older, replayed description is refused
             version = manifest["version"].lstrip("v")
             if not updater.newer(manifest):
                 self.up_to_date.emit()

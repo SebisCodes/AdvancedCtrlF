@@ -71,7 +71,8 @@ def _ooxml_kind(path: Path) -> str | None:
                 if any(n.startswith("xl/") for n in names):
                     return ".xlsx"
             if "mimetype" in names:
-                mt = z.read("mimetype")[:100].decode("ascii", "ignore")
+                with z.open("mimetype") as f:
+                    mt = f.read(100).decode("ascii", "ignore")
                 for key, ext in (("text", ".odt"), ("presentation", ".odp"), ("spreadsheet", ".ods"), ("epub", ".epub")):
                     if key in mt:
                         return ext

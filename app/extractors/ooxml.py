@@ -12,7 +12,7 @@ from pathlib import Path
 
 from .. import lang as langmod
 from ..ocr import ImageOCR
-from .base import Chunker, Context, ExtractError, Result, safe_xml
+from .base import Chunker, Context, ExtractError, Result, check_zip_expansion, read_member, safe_xml
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
@@ -36,9 +36,7 @@ def _read(z: zipfile.ZipFile, name: str) -> bytes | None:
         info = z.getinfo(name)
     except KeyError:
         return None
-    if info.file_size > MAX_PART:
-        raise ExtractError(f"Part {name} is too large")
-    return z.read(info)
+    return read_member(z, info, MAX_PART)
 
 
 def _rels(z: zipfile.ZipFile, part: str) -> dict[str, str]:
@@ -389,6 +387,10 @@ def extract_xlsx(path: Path, ctx: Context) -> Result:
     except ImportError as e:
         raise ExtractError("openpyxl is missing") from e
     ch = Chunker()
+    try:
+        check_zip_expansion(path)            # openpyxl reads parts with z.read() (no size limit)
+    except zipfile.BadZipFile as e:
+        raise ExtractError("Not a valid Excel file") from e
     try:
         wb = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
     except Exception as e:

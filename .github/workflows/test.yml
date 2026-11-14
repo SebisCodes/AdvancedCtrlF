@@ -60,6 +60,40 @@ jobs:
       - name: GUI smoke test
         run: $PY -I -W ignore tests/smoke_gui.py
 
+      # start.cmd must treat folder names as text and roll back an interrupted update - including
+      # replacing itself while it runs. The folder name would run "mkdir injected" if it were code.
+      - name: Prepare launcher in a folder with special characters (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          d="$(cygpath -u "$RUNNER_TEMP")/acf & mkdir injected & rem (x)!"
+          mkdir -p "$d/data/updates/backup-1.0.0"
+          cp -r app tools advanced_ctrl_f.py requirements.txt requirements.in start.cmd "$d/"
+          { printf '@echo off\r\necho restored>"%%~dp0old-launcher-ran.txt"\r\n'; tail -n +2 start.cmd; } > "$d/data/updates/backup-1.0.0/start.cmd"
+          echo old > "$d/data/updates/backup-1.0.0/OLDFILE.txt"
+          echo new > "$d/NEWFILE.txt"
+          printf 'backup-1.0.0\r\nold start.cmd\r\nold OLDFILE.txt\r\nnew NEWFILE.txt\r\nold data\r\n' > "$d/data/updates/applying"
+          echo "ACF_DIR=$(cygpath -w "$d")" >> "$GITHUB_ENV"
+
+      - name: Run that launcher (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          set "PYTHON_BIN=%GITHUB_WORKSPACE%\python\python\python.exe"
+          call "%ACF_DIR%\start.cmd" setup
+
+      - name: Check rollback and that no folder name ran as a command (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          d="$(cygpath -u "$ACF_DIR")"
+          cat "$d/data/setup.log"
+          test -f "$d/old-launcher-ran.txt"        # the restored launcher was started
+          test -f "$d/OLDFILE.txt" && test ! -e "$d/NEWFILE.txt" && test ! -e "$d/data/updates/applying"
+          grep -q "rolled back" "$d/data/setup.log" && grep -q "Setup complete" "$d/data/setup.log"
+          grep -q "acf & mkdir injected & rem (x)!" "$d/data/setup.log"   # the name is logged as text
+          for w in "$d" "$GITHUB_WORKSPACE" "$(cygpath -u "$RUNNER_TEMP")"; do
+            if [ -e "$w/injected" ]; then echo "::error::the folder name was run as a command"; exit 1; fi
+          done
+
       - name: Report setup.log on failure
         if: failure()
         run: |

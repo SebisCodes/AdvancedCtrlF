@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 
 from . import config as cfg
 from .extractors import Context, ExtractError, extract, is_archive, sniff, suffix
+from .extractors.base import BOUNDED_COMPRESSION
 
 log = logging.getLogger(__name__)
 
@@ -53,6 +54,7 @@ def write_zone(path: Path, zone: str | None) -> None:
 MAX_ARCHIVE_TOTAL = 4 * 1024 ** 3   # protection against zip bombs
 MAX_ARCHIVE_MEMBERS = 100_000      # large repositories have tens of thousands of files
 MAX_ARCHIVE_DEPTH = 3
+_DOC_ID = re.compile(r"[0-9a-f]{16}")
 SCHEMA = 1
 
 # Folders that hold version control data, installed dependencies, caches or virtual
@@ -140,18 +142,20 @@ def _safe_member_path(name: str) -> PurePosixPath | None:
     return p
 
 
-def unpack_archive(path: Path, dest: Path) -> list[Path]:
-    """Unpack an archive safely (no zip slip, no links, size limits)."""
+def unpack_archive(path: Path, dest: Path, budget: dict | None = None) -> list[Path]:
+    """Unpack an archive safely (no zip slip, no links, size limits).
+    `budget` ({"bytes", "members"}) is shared by archives nested in each other, so the limits
+    apply to everything one import unpacks, not to each archive on its own."""
     out: list[Path] = []
-    total = 0
+    budget = budget if budget is not None else {"bytes": 0, "members": 0}
 
     def write(member_name: str, size: int, opener) -> None:
-        nonlocal total
         rel = _safe_member_path(member_name)
         if rel is None or skipped(rel.parts):
             return
-        total += size
-        if total > MAX_ARCHIVE_TOTAL or len(out) >= MAX_ARCHIVE_MEMBERS:
+        budget["bytes"] += size
+        budget["members"] += 1
+        if budget["bytes"] > MAX_ARCHIVE_TOTAL or budget["members"] > MAX_ARCHIVE_MEMBERS:
             raise ExtractError("Archive too large (zip bomb protection)")
         target = dest.joinpath(*rel.parts)
         if dest.resolve() not in target.resolve().parents:
@@ -174,6 +178,10 @@ def unpack_archive(path: Path, dest: Path) -> list[Path]:
                 mode = (info.external_attr >> 16) & 0o170000
                 if mode and not stat.S_ISREG(mode):
                     continue  # skip symlinks and the like
+                if info.compress_type not in BOUNDED_COMPRESSION:
+                    log.warning("Skipped %s in %s: bzip2/LZMA compression is not unpacked "
+                                "(no size limit while decompressing)", info.filename, path.name)
+                    continue
                 write(info.filename, info.file_size, lambda i=info: z.open(i))
     else:
         with tarfile.open(path) as t:
@@ -184,6 +192,13 @@ def unpack_archive(path: Path, dest: Path) -> list[Path]:
 
 
 class Store:
+    @staticmethod
+    def index_path(doc_id) -> Path:
+        """data/index/<id>.json - only for ids the program generates (16 hex digits)."""
+        if not isinstance(doc_id, str) or not _DOC_ID.fullmatch(doc_id):
+            raise ValueError(f"invalid document id {doc_id!r}")
+        return cfg.INDEX_DIR / f"{doc_id}.json"
+
     def __init__(self, config: dict) -> None:
         cfg.ensure_dirs()
         self.config = config
@@ -199,7 +214,7 @@ class Store:
             except (OSError, ValueError) as e:
                 log.warning("Index %s is broken: %s", f, e)
                 continue
-            if isinstance(d, dict) and "id" in d:
+            if isinstance(d, dict) and d.get("id") == f.stem and _DOC_ID.fullmatch(f.stem):
                 docs.append(d)
                 self._by_sha[d.get("sha1", "")] = d["id"]
         return docs
@@ -210,7 +225,8 @@ class Store:
 
     # ------------------------------------------------------------ Adding
     def add_path(self, src: Path, ctx: Context, display_prefix: str = "", depth: int = 0,
-                 extra: dict | None = None, base: Path | None = None, zone: str | None = None) -> list[dict]:
+                 extra: dict | None = None, base: Path | None = None, zone: str | None = None,
+                 budget: dict | None = None) -> list[dict]:
         """Add a file, folder or archive. Returns new/updated documents.
         `extra` is stored with every document (e.g. the source URL); for folders, display
         names are relative to `base` (default: the folder's parent, i.e. include its name)."""
@@ -224,7 +240,7 @@ class Store:
                 ctx.progress(f"File {n}/{len(files)}")
                 folder = p.parent.relative_to(base).as_posix()
                 prefix = display_prefix + ("" if folder == "." else f"{folder}/")
-                docs += self.add_path(p, ctx, prefix, depth, extra, zone=zone)
+                docs += self.add_path(p, ctx, prefix, depth, extra, zone=zone, budget=budget)
             return docs
         size = src.stat().st_size
         if size > self.config.get("max_file_mb", 500) * 1024 * 1024:
@@ -233,9 +249,10 @@ class Store:
             ctx.progress(f"Unpacking {src.name} …")
             docs = []
             member_zone = zone or read_zone(src) or (internet_zone(extra["source"]) if (extra or {}).get("source") else None)
+            budget = budget if budget is not None else {"bytes": 0, "members": 0}   # shared by nested archives
             with tempfile.TemporaryDirectory() as tmp:
                 try:
-                    files = unpack_archive(src, Path(tmp))
+                    files = unpack_archive(src, Path(tmp), budget)
                 except (ExtractError, zipfile.BadZipFile, tarfile.TarError, OSError) as e:
                     return [self._error_doc(src, display_prefix, f"Archive could not be read: {e}")]
                 for f in files:
@@ -243,7 +260,7 @@ class Store:
                         break
                     rel = f.relative_to(tmp).as_posix()
                     prefix = f"{display_prefix}{src.name} › {rel.rsplit('/', 1)[0] + '/' if '/' in rel else ''}"
-                    docs += self.add_path(f, ctx, prefix, depth + 1, extra, zone=member_zone)
+                    docs += self.add_path(f, ctx, prefix, depth + 1, extra, zone=member_zone, budget=budget)
             return docs
         return [self._add_file(src, ctx, display_prefix, extra, zone)]
 
@@ -252,34 +269,38 @@ class Store:
         """A downloaded repository snapshot (e.g. GitHub ZIP): files are shown as
         "label › path/in/repo", optionally only those below `subpath`."""
         ctx.progress(f"Unpacking {label} …")
+        budget = {"bytes": 0, "members": 0}      # shared with archives inside the repository
         with tempfile.TemporaryDirectory() as tmp:
             try:
-                unpack_archive(archive, Path(tmp))
+                unpack_archive(archive, Path(tmp), budget)
             except (ExtractError, zipfile.BadZipFile, tarfile.TarError, OSError) as e:
                 return [self._error_doc(archive, f"{label} › ", f"Archive could not be read: {e}")]
             tops = [p for p in Path(tmp).iterdir()]
             root = tops[0] if len(tops) == 1 and tops[0].is_dir() else Path(tmp)   # "repo-main/" folder
-            start = root / subpath if subpath else root
+            start = (root / subpath).resolve() if subpath else root
+            if start != root.resolve() and root.resolve() not in start.parents:
+                return [self._error_doc(archive, f"{label} › ", f"Folder {subpath!r} is outside the repository")]
             if not start.exists():
                 return [self._error_doc(archive, f"{label} › ", f"Folder {subpath!r} not found in the repository")]
             if start.is_file():
-                rel = start.parent.relative_to(root).as_posix()
-                return self.add_path(start, ctx, f"{label} › " + ("" if rel == "." else f"{rel}/"), 0, extra)
-            return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root)
+                rel = start.parent.relative_to(root.resolve()).as_posix()
+                return self.add_path(start, ctx, f"{label} › " + ("" if rel == "." else f"{rel}/"), 0, extra,
+                                     budget=budget)
+            return self.add_path(start, ctx, f"{label} › ", 0, extra, base=root.resolve(), budget=budget)
 
     def _add_file(self, src: Path, ctx: Context, display_prefix: str, extra: dict | None = None,
                   zone: str | None = None) -> dict:
         sha = sha1_file(src)
         with self._lock:
             existing = self._by_sha.get(sha)
-        if existing and (cfg.INDEX_DIR / f"{existing}.json").exists():
+        if existing and self.index_path(existing).exists():
             return {"id": existing, "duplicate": True, "name": src.name}
         doc_id = sha[:16]
         stored_name = f"{doc_id[:8]}_{safe_filename(src.name)}"
         target = cfg.DOCS_DIR / stored_name
         shutil.copyfile(src, target)   # deliberately without permissions/metadata (no exec bit)
         if os.name != "nt":
-            os.chmod(target, 0o644)
+            os.chmod(target, 0o600)    # only the user (the original may be confidential)
         write_zone(target, zone or read_zone(src)
                    or (internet_zone(extra["source"]) if (extra or {}).get("source") else None))
         doc = {
@@ -336,7 +357,7 @@ class Store:
         return {"id": None, "name": src.name, "display_name": prefix + src.name, "status": "error", "message": msg}
 
     def _save(self, doc: dict) -> None:
-        cfg.atomic_write_text(cfg.INDEX_DIR / f"{doc['id']}.json", json.dumps(doc, ensure_ascii=False))
+        cfg.atomic_write_text(self.index_path(doc["id"]), json.dumps(doc, ensure_ascii=False))
 
     # ------------------------------------------------------------ Maintenance
     def reindex(self, doc: dict, ctx: Context) -> dict:
@@ -346,7 +367,7 @@ class Store:
         return new
 
     def remove(self, doc: dict) -> None:
-        for p in (self.stored_path(doc), cfg.INDEX_DIR / f"{doc['id']}.json"):
+        for p in (self.stored_path(doc), self.index_path(doc["id"])):
             try:
                 p.unlink()
             except FileNotFoundError:

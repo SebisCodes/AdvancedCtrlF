@@ -7,12 +7,17 @@ An extractor returns a list of chunks:
 from __future__ import annotations
 
 import re
+import struct
 import xml.etree.ElementTree as ET
+import zipfile
+import zlib
+from xml.parsers import expat
 from dataclasses import dataclass, field
 from typing import Callable
 
 MAX_CHUNK = 900  # characters per chunk (paragraphs are merged up to this size)
 MAX_XML_BYTES = 200 * 1024 * 1024
+MAX_MEMBER_BYTES = 200 * 1024 * 1024   # one part of a ZIP-based document (uncompressed)
 
 
 class ExtractError(Exception):
@@ -54,14 +59,97 @@ def clean(text: str) -> str:
     return "\n".join(out).strip()
 
 
+BOUNDED_COMPRESSION = (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)
+
+
+def open_member(z: zipfile.ZipFile, info: zipfile.ZipInfo):
+    """Open a ZIP member for reading in small blocks. Only "stored" and "deflate" are accepted:
+    zipfile decompresses those with an output limit per read call, bzip2/LZMA without one (a
+    small block could expand to gigabytes). Office files, OpenDocument and EPUB use deflate."""
+    if info.compress_type not in BOUNDED_COMPRESSION:
+        raise ExtractError(f"Part {info.filename} uses an unsupported compression")
+    return z.open(info)
+
+
+def read_member(z: zipfile.ZipFile, name, limit: int = MAX_MEMBER_BYTES) -> bytes:
+    """A ZIP member of at most `limit` bytes, decompressed block by block - never z.read(),
+    which decompresses everything first and only then cuts it to the declared size."""
+    info = name if isinstance(name, zipfile.ZipInfo) else z.getinfo(name)
+    if info.file_size > limit:
+        raise ExtractError(f"Part {info.filename} is too large")
+    out = bytearray()
+    with open_member(z, info) as f:
+        while block := f.read(1 << 20):
+            out += block
+            if len(out) > limit:
+                raise ExtractError(f"Part {info.filename} is too large")
+    return bytes(out)
+
+
+def check_zip_expansion(path, member_limit: int = MAX_MEMBER_BYTES, total_limit: int = 4 * MAX_MEMBER_BYTES) -> None:
+    """Before a library (openpyxl) reads a ZIP with z.read(): measure what every member really
+    expands to, from its raw compressed bytes, without keeping the output. The declared sizes
+    in the ZIP cannot be trusted for that - z.read() decompresses all data and cuts afterwards."""
+    total = 0
+    with zipfile.ZipFile(path) as z, open(path, "rb") as raw:
+        for info in z.infolist():
+            if info.compress_type not in BOUNDED_COMPRESSION or info.flag_bits & 0x1:
+                raise ExtractError(f"Part {info.filename} uses an unsupported compression or encryption")
+            raw.seek(info.header_offset)
+            head = raw.read(30)
+            if len(head) < 30 or head[:4] != b"PK\x03\x04":
+                raise ExtractError("Broken ZIP file")
+            name_len, extra_len = struct.unpack("<HH", head[26:30])
+            raw.seek(info.header_offset + 30 + name_len + extra_len)
+            left, size = info.compress_size, 0
+            inflate = zlib.decompressobj(-15) if info.compress_type == zipfile.ZIP_DEFLATED else None
+            while left > 0:
+                data = raw.read(min(left, 1 << 16))
+                if not data:
+                    break
+                left -= len(data)
+                while data:
+                    if inflate is None:
+                        size, data = size + len(data), b""
+                    else:
+                        size += len(inflate.decompress(data, 1 << 20))
+                        data = inflate.unconsumed_tail
+                    if size > member_limit or total + size > total_limit:
+                        raise ExtractError(f"Part {info.filename} is too large (zip bomb protection)")
+            total += size
+
+
+class _PrologDone(Exception):
+    pass
+
+
+def _reject_entity_declarations(data: bytes) -> None:
+    """Entity declarations can only stand in the DOCTYPE before the root element. expat reads
+    that prolog in the document's own encoding (UTF-8, UTF-16, Latin-1, ...) and stops at the
+    first element - a byte search for "<!ENTITY" would miss e.g. UTF-16."""
+    p = expat.ParserCreate()
+
+    def entity(*_):
+        raise UnsafeXML("XML with ENTITY definitions is not read for security reasons")
+
+    def first_element(*_):
+        raise _PrologDone
+
+    p.EntityDeclHandler = entity
+    p.StartElementHandler = first_element
+    try:
+        p.Parse(data, True)
+    except (_PrologDone, expat.ExpatError):
+        pass                                 # broken XML is reported by the real parser below
+
+
 def safe_xml(data: bytes) -> ET.Element:
     """Parse XML without entity definitions (protection against XXE / "billion laughs")."""
     if len(data) > MAX_XML_BYTES:
         raise ExtractError("XML part too large")
     # expat/ElementTree never resolve external entities; custom entity
-    # definitions (expansion bombs) are always rejected.
-    if re.search(rb"<!entity", data, re.IGNORECASE):
-        raise UnsafeXML("XML with ENTITY definitions is not read for security reasons")
+    # definitions (expansion bombs) are always rejected, in any encoding.
+    _reject_entity_declarations(data)
     return ET.fromstring(data)
 
 

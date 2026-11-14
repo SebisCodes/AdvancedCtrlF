@@ -117,6 +117,54 @@ class ExtractTests(Base):
     def test_xml_entities_refused(self):
         with self.assertRaises(ExtractError):
             extract(self.tmp / "in" / "bomb.xml", self.ctx)
+        from app.extractors.base import UnsafeXML, safe_xml
+        bomb = '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE r [<!ENTITY a "aaaaaaaaaa">]><r>&a;&a;</r>'
+        for data in (bomb.encode("utf-16"), bomb.replace("UTF-16", "UTF-8").encode()):
+            with self.assertRaises(UnsafeXML):
+                safe_xml(data)
+        self.assertEqual(safe_xml('<r>Grüße</r>'.encode("utf-16")).text, "Grüße")
+        self.assertEqual(safe_xml(b"<r><!-- <!ENTITY in a comment --> ok</r>").tag, "r")
+
+    def test_hostile_documents_stay_small_and_fast(self):
+        import time
+        from app.extractors.odf import _spaces
+        from app.extractors.textual import script_pairs
+        self.assertEqual(_spaces("1000000000"), 100)
+        self.assertEqual(_spaces("x"), 1)
+        self.assertEqual(_spaces(None), 1)
+        code = "'" + "\\'" * 200000                                   # unterminated, many escaped quotes
+        start = time.monotonic()
+        script_pairs([(1, code), (1, "`" + "\\`" * 200000), (1, "/*" * 200000), (1, "`${" * 100000 + "`")])
+        self.assertLess(time.monotonic() - start, 5)
+        self.assertEqual(script_pairs([(5, 'a = "Guten Morgen Welt";\n// "kein Text hier"\nb = \'Zweite Zeile Text\'')]),
+                         [(5, "Guten Morgen Welt"), (7, "Zweite Zeile Text")])
+        self.assertEqual(script_pairs([(1, "const re = /'/; const m = \"Hello wide world\";")]),
+                         [(1, "Hello wide world")])                         # quote in a regex literal
+
+    def test_zip_members_are_decompressed_with_a_limit(self):
+        import io
+        import tracemalloc
+        import zipfile
+        from app.extractors.base import check_zip_expansion, read_member
+        path = self.tmp / "bomb-member.zip"
+        with zipfile.ZipFile(path, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("big.xml", b"0" * 120_000_000)
+            zf.writestr("b.xml", b"x", compress_type=zipfile.ZIP_BZIP2)
+        with self.assertRaises(ExtractError):
+            check_zip_expansion(path, 10_000_000)
+        z = zipfile.ZipFile(path)
+        lying = z.getinfo("big.xml")
+        lying.file_size = 1                                             # declares 1 byte
+        tracemalloc.start()
+        try:
+            with self.assertRaises(Exception):
+                read_member(z, lying, 1024)
+            self.assertLess(tracemalloc.get_traced_memory()[1], 50_000_000)
+        finally:
+            tracemalloc.stop()
+        with self.assertRaises(ExtractError):
+            read_member(z, "b.xml")                                     # bzip2: no output limit in zipfile
+        z.close()
 
 
 class ImageOcrTests(Base):
@@ -259,6 +307,44 @@ class AnyFileAndRepositoryTests(Base):
         self.assertEqual(names, {"acme/shop › docs/guide.md", "acme/shop › src/cart.py"})
         sub = store.add_repository_archive(z, "acme/shop@main", self.ctx, subpath="docs")
         self.assertEqual([d.get("display_name") or d.get("name") for d in sub], ["guide.md"])  # duplicate content
+        outside = store.add_repository_archive(z, "acme/shop", self.ctx, subpath="../..")
+        self.assertEqual([d["status"] for d in outside], ["error"])
+
+    def test_index_ids_and_private_copies(self):
+        import json as _json
+        store = self.store()
+        f = self.tmp / "geheim.txt"
+        f.write_text("Vertrauliche Gehaltsliste")
+        doc = store.add_path(f, self.ctx)[0]
+        if os.name != "nt":
+            self.assertEqual(store.stored_path(doc).stat().st_mode & 0o777, 0o600)
+        evil = dict(doc, id="../../config/config")
+        with self.assertRaises(ValueError):
+            store.remove(evil)
+        with self.assertRaises(ValueError):
+            store._save(evil)
+        (cfg.INDEX_DIR / "0123456789abcdef.json").write_text(_json.dumps(dict(doc, id="../x")))
+        self.assertEqual([d["id"] for d in store.load_all()], [doc["id"]])
+
+    def test_nested_archives_share_one_size_budget(self):
+        import io
+        import zipfile
+        from app import store as st
+        inner = io.BytesIO()
+        with zipfile.ZipFile(inner, "w", zipfile.ZIP_DEFLATED) as zf:
+            zf.writestr("inner.txt", "x" * 6000)
+        outer = self.tmp / "nested.zip"
+        with zipfile.ZipFile(outer, "w") as zf:
+            for i in range(3):
+                zf.writestr(f"part{i}.zip", inner.getvalue())
+        saved = st.MAX_ARCHIVE_TOTAL
+        try:
+            st.MAX_ARCHIVE_TOTAL = 10000     # each inner archive alone fits, all of them together do not
+            docs = self.store().add_path(outer, self.ctx)
+        finally:
+            st.MAX_ARCHIVE_TOTAL = saved
+        self.assertTrue(any(d.get("status") == "error" and "too large" in d.get("message", "") for d in docs))
+        self.assertLess(sum(1 for d in docs if d.get("status") != "error"), 3)
 
     def test_link_parsing(self):
         from app.remote import parse
@@ -267,6 +353,11 @@ class AnyFileAndRepositoryTests(Base):
         self.assertEqual(parse("https://example.org/a.pdf")["kind"], "file")
         with self.assertRaises(ExtractError):
             parse("http://example.org/a.pdf")
+        for bad in ("https://github.com/acme/shop/tree/main/%2e%2e/%2e%2e/private",
+                    "https://github.com/acme/shop/tree/main/docs/..%5C..%5Csecret",
+                    "https://github.com/acme/shop/blob/main/./x.md"):
+            with self.assertRaises(ExtractError):
+                parse(bad)
 
     def test_download_fallback(self):
         from app import net
@@ -285,6 +376,21 @@ class AnyFileAndRepositoryTests(Base):
             net.methods = saved
         with self.assertRaises(net.DownloadError):
             net.fetch_curl("http://example.org/a.bin", self.tmp / "x")
+        try:   # too large is final: no second method downloads it again
+            tried = []
+            def big(url, dest, *a): tried.append(1); raise net.TooLarge("download larger than 1 MB")
+            net.methods = lambda: [("Python", big), ("curl", big)]
+            with self.assertRaises(net.TooLarge):
+                net.download("https://example.org/a.bin", self.tmp / "big.bin")
+            self.assertEqual(len(tried), 1)
+        finally:
+            net.methods = saved
+        self.assertEqual(net.redact("https://user:pw@example.org:8443/f.pdf?X-Amz-Signature=abc#p"),
+                         "https://example.org:8443/f.pdf?…")
+        u = "https://example.org/f.pdf?token=SECRET123"
+        self.assertNotIn("SECRET123", net.scrub(f"bad request {u} (query token=SECRET123)", u))
+        self.assertTrue(net.powershell_exe().lower().endswith("windowspowershell\\v1.0\\powershell.exe")
+                        or "WindowsPowerShell" in net.powershell_exe())
 
 
 class DownloadIntegrityTests(Base):
@@ -320,6 +426,32 @@ class DownloadIntegrityTests(Base):
         self.assertEqual(opener.SAFE_OPEN & opener.MACRO_CAPABLE, set())
         for ext in (".docm", ".xlsm", ".pptm", ".doc", ".xls", ".ppt"):
             self.assertNotIn(ext, opener.SAFE_OPEN)
+
+    def test_opendocument_with_macros_is_not_launched(self):
+        import zipfile
+        from app import opener
+        plain, macro = self.tmp / "plain.odt", self.tmp / "macro.odt"
+        for path, extra in ((plain, None), (macro, "Basic/Standard/Module1.xml")):
+            with zipfile.ZipFile(path, "w") as zf:
+                zf.writestr("mimetype", "application/vnd.oasis.opendocument.text")
+                zf.writestr("content.xml", "<x/>")
+                if extra:
+                    zf.writestr(extra, "<script/>")
+        self.assertFalse(opener.odf_has_macros(plain))
+        self.assertTrue(opener.odf_has_macros(macro))
+        (self.tmp / "broken.odt").write_bytes(b"not a zip")
+        self.assertTrue(opener.odf_has_macros(self.tmp / "broken.odt"))       # cannot be checked -> not launched
+        event, normal = self.tmp / "event.odt", self.tmp / "normal.odt"
+        with zipfile.ZipFile(event, "w", zipfile.ZIP_DEFLATED) as zf:             # macro bound to "document opened"
+            zf.writestr("content.xml", '<office:document-content><office:scripts><office:event-listeners>'
+                        '<script:event-listener script:language="ooo:script" script:event-name="dom:load" '
+                        'xlink:href="vnd.sun.star.script:Standard.Module1.Main?language=Basic&amp;location=application"/>'
+                        '</office:event-listeners></office:scripts></office:document-content>')
+        with zipfile.ZipFile(normal, "w", zipfile.ZIP_DEFLATED) as zf:            # as LibreOffice writes it
+            zf.writestr("content.xml", "<office:document-content><office:scripts/><office:body>Text"
+                        "</office:body></office:document-content>")
+        self.assertTrue(opener.odf_has_macros(event))
+        self.assertFalse(opener.odf_has_macros(normal))
 
     @unittest.skipUnless(os.name == "nt", "Mark of the Web exists only on Windows (NTFS)")
     def test_stored_copies_keep_mark_of_the_web(self):
@@ -585,20 +717,195 @@ class UpdaterTests(Base):
             bad = {**manifest, "sha256": "0" * 64}
             with self.assertRaises(updater.UpdateError):                          # checksum mismatch
                 updater.stage(root, bad)
-            self.assertIsNone(updater.staged(root, "1.4.0"))
+            self.assertIsNone(updater.staged(root, "1.4.0", pub))
             staged_dir = updater.stage(root, manifest)
         finally:
             net.download = saved
-        self.assertEqual(updater.staged(root, "1.4.0")[0], "1.5.0")
-        self.assertIsNone(updater.staged(root, "1.5.0"))                           # not newer -> not offered
+        self.assertEqual(updater.staged(root, "1.4.0", pub)[0], "1.5.0")
+        self.assertIsNone(updater.staged(root, "1.5.0", pub))                      # not newer -> not offered
+        self.assertIsNone(updater.staged(root, "1.4.0"))                           # signed with another key
         self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())        # nothing changed yet
-        self.assertEqual(updater.apply(root, staged_dir), "1.5.0")
+        self.assertEqual(updater.apply(root, staged_dir, pub), "1.5.0")
         self.assertIn("1.5.0", (root / "app" / "__init__.py").read_text())
         self.assertIn("1.5.0", (root / "start.sh").read_text())
         for keep in ("data/index/doc.json", "config/config.json", "python/bin/python3"):
             self.assertEqual((root / keep).read_text(), "mine")
         self.assertTrue(any((root / "data" / "updates").glob("backup-*/app/__init__.py")))
         self.assertFalse(staged_dir.exists())
+        self.assertFalse((root / "data" / "updates" / "applying").exists())
+
+    def staged_release(self, name, old="1.4.0", new="1.5.0"):
+        from app import ed25519, net, updater
+        pub = ed25519.public_key(self.KEY)
+        root = self.program(old, name)
+        z, raw, sig = self.release(self.program(new, name + "-src"), new)
+        saved = net.download
+        try:
+            net.download = lambda url, dest, *a, **k: shutil.copyfile(z, dest)
+            staged_dir = updater.stage(root, updater.check_manifest(raw, sig, pub))
+        finally:
+            net.download = saved
+        return root, staged_dir, pub
+
+    def test_staged_updates_are_verified_again(self):
+        from app import updater
+        root, staged_dir, pub = self.staged_release("reverify")
+        forged = root / "data" / "updates" / "staged-9.0.0"                       # planted, not signed
+        forged.mkdir()
+        (forged / "ok").write_text("checked")
+        shutil.copy(staged_dir / "update.zip", forged / "update.zip")
+        self.assertEqual(updater.staged(root, "1.4.0", pub)[0], "1.5.0")
+        shutil.copy(staged_dir / "latest.json", forged / "latest.json")          # signed for 1.5.0, not 9.0.0
+        shutil.copy(staged_dir / "latest.json.sig", forged / "latest.json.sig")
+        self.assertEqual(updater.staged(root, "1.4.0", pub)[0], "1.5.0")
+        with self.assertRaises(updater.UpdateError):
+            updater.apply(root, forged, pub)
+        with open(staged_dir / "update.zip", "ab") as f:                           # archive changed after staging
+            f.write(b"x")
+        with self.assertRaises(updater.UpdateError):
+            updater.apply(root, staged_dir, pub)
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())
+
+    def test_update_is_never_a_downgrade(self):
+        from app import updater
+        root, staged_dir, pub = self.staged_release("nodowngrade")
+        (root / "app" / "__init__.py").write_text('__version__ = "1.6.0"\n')   # installed meanwhile
+        with self.assertRaises(updater.UpdateError):
+            updater.apply(root, staged_dir, pub)
+        self.assertIn("1.6.0", (root / "app" / "__init__.py").read_text())
+
+    def test_replayed_old_description_is_refused(self):
+        from app import updater
+        root = self.program("1.4.0", "replay")
+        updater.remember_version(root, {"version": "1.5.3"}, "1.4.0")
+        updater.remember_version(root, {"version": "1.5.3"}, "1.4.0")
+        with self.assertRaises(updater.UpdateError):
+            updater.remember_version(root, {"version": "1.5.1"}, "1.4.0")
+        updater.remember_version(root, {"version": "1.6.0"}, "1.4.0")
+        with self.assertRaises(updater.UpdateError):
+            updater.remember_version(root, {"version": "1.5.3"}, "1.4.0")
+        fresh = self.program("1.7.0", "replay2")                                  # older than installed
+        with self.assertRaises(updater.UpdateError):
+            updater.remember_version(fresh, {"version": "1.6.0"}, "1.7.0")
+
+    def test_damaged_staged_update_is_downloaded_again(self):
+        from app import net, updater
+        root, staged_dir, pub = self.staged_release("restage")
+        (staged_dir / "update.zip").write_bytes(b"broken")
+        z = self.tmp / "AdvancedCtrlF-1.5.0.zip"
+        manifest = updater.check_manifest((staged_dir / "latest.json").read_bytes(),
+                                          (staged_dir / "latest.json.sig").read_text(), pub)
+        saved = net.download
+        try:
+            net.download = lambda url, dest, *a, **k: shutil.copyfile(z, dest)
+            again = updater.stage(root, manifest, public_key=pub)
+        finally:
+            net.download = saved
+        self.assertEqual(updater.sha256_file(again / "update.zip"), manifest["sha256"])
+
+    def test_rollback_ignores_names_outside_the_program_folder(self):
+        from app import updater
+        root = self.program("1.4.0", "rb-names")
+        upd = root / "data" / "updates"
+        upd.mkdir(parents=True)
+        victim = self.tmp / "rb-victim.txt"
+        victim.write_text("keep me")
+        (upd / "applying").write_text("backup-../..\nnew ../rb-victim.txt\nnew ..\nnew data\nold app\n")
+        self.assertTrue(updater.rollback(root))
+        self.assertTrue(victim.exists())
+        self.assertTrue((root / "app" / "__init__.py").exists())
+        self.assertTrue((root / "data").exists())
+
+    def test_interrupted_install_is_rolled_back(self):
+        import os as _os
+        from app import updater
+        root, staged_dir, pub = self.staged_release("interrupted")
+        calls = []
+        real = _os.replace
+
+        def crash(a, b):                     # failure after the first file was swapped (once)
+            if Path(b).parent == root:
+                calls.append(b)
+                if len(calls) == 2:
+                    raise OSError("simulated interruption")
+            return real(a, b)
+        try:
+            updater.os.replace = crash
+            with self.assertRaises(updater.UpdateError):
+                updater.apply(root, staged_dir, pub)
+        finally:
+            updater.os.replace = real
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())
+        self.assertIn("1.4.0", (root / "start.sh").read_text())
+        self.assertTrue((root / "advanced_ctrl_f.py").is_file())
+        self.assertFalse((root / "data" / "updates" / "applying").exists())
+
+    def test_failed_rollback_keeps_the_journal(self):
+        from app import updater
+        root, staged_dir, pub = self.staged_release("rb-fails")
+        real = updater.os.replace
+
+        def always(a, b):                    # the folder stays locked: every swap into it fails
+            if Path(b).parent == root and Path(a).parent != root:
+                calls.append(b)
+                if len(calls) > 1:
+                    raise OSError("locked")
+            return real(a, b)
+        calls = []
+        try:
+            updater.os.replace = always
+            with self.assertRaises(updater.UpdateError):
+                updater.apply(root, staged_dir, pub)
+        finally:
+            updater.os.replace = real
+        self.assertTrue((root / "data" / "updates" / "applying").exists())     # next start tries again
+        self.assertTrue(updater.rollback(root))
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())
+        self.assertIn("1.4.0", (root / "start.sh").read_text())
+
+    @unittest.skipIf(os.name == "nt", "start.sh is the launcher for Linux and macOS")
+    def test_launcher_rolls_back_an_interrupted_install(self):
+        import subprocess
+        root = self.program("1.4.0", "rollback-launcher")
+        (root / "tools").mkdir()
+        (root / "tools" / "ensure_deps.py").write_text("")
+        shutil.copy(ROOT / "start.sh", root / "start.sh")
+        upd = root / "data" / "updates"
+        backup = upd / "backup-1.4.0"
+        (backup / "app").mkdir(parents=True)
+        shutil.move(str(root / "app" / "__init__.py"), str(backup / "app" / "__init__.py"))  # old app aside
+        (root / "app" / "__init__.py").write_text('__version__ = "1.5.0"\n')               # new one half in
+        (root / "NEWFILE").write_text("only in the new version")
+        (upd / "applying").write_text("backup-1.4.0\nold app\nnew NEWFILE\nold advanced_ctrl_f.py\n"
+                                      "old ../outside\nold data\n")
+        shutil.rmtree(root / "app")
+        (root / "app").mkdir()
+        (root / "app" / "__init__.py").write_text('__version__ = "1.5.0"\n')
+        r = subprocess.run(["bash", str(root / "start.sh"), "--setup"], capture_output=True, text=True, timeout=60,
+                           env=dict({k: v for k, v in os.environ.items() if k != "PYTHON_BIN"},
+                                    PYTHON_BIN=sys.executable))
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("rolled back", r.stdout)
+        self.assertIn("1.4.0", (root / "app" / "__init__.py").read_text())
+        self.assertFalse((root / "NEWFILE").exists())
+        self.assertTrue((root / "advanced_ctrl_f.py").is_file())                 # not in the backup: kept
+        self.assertFalse((upd / "applying").exists())
+
+    @unittest.skipIf(os.name == "nt", "start.sh is the launcher for Linux and macOS")
+    def test_launcher_restores_python_of_an_interrupted_switch(self):
+        import subprocess
+        root = self.tmp / "py-interrupted"
+        (root / "tools").mkdir(parents=True)
+        shutil.copy(ROOT / "start.sh", root / "start.sh")
+        (root / "tools" / "ensure_deps.py").write_text("")
+        (root / "python" / "_old" / "bin").mkdir(parents=True)                    # only _old is left
+        os.symlink(sys.executable, root / "python" / "_old" / "bin" / "python3")
+        r = subprocess.run(["bash", str(root / "start.sh"), "--setup"], capture_output=True, text=True, timeout=60,
+                           env={k: v for k, v in os.environ.items() if k != "PYTHON_BIN"})
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("Restored the previous Python", r.stdout)
+        self.assertTrue((root / "python" / "python" / "bin" / "python3").exists())
+        self.assertFalse((root / "python" / "_old").exists())
 
     def test_wrong_version_in_archive_and_git_checkout(self):
         from app import ed25519, net, updater

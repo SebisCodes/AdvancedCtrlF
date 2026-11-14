@@ -52,6 +52,21 @@ DEFAULTS: dict = {
 def ensure_dirs() -> None:
     for d in (CONFIG_DIR, DOCS_DIR, INDEX_DIR, TESSDATA_DIR):
         d.mkdir(parents=True, exist_ok=True)
+    private(DATA_DIR, CONFIG_DIR)
+
+
+def private(*dirs: Path) -> None:
+    """Copies of documents, their text and the settings are readable by this user only
+    (macOS/Linux; on Windows the program folder normally lies in the user's own profile)."""
+    if os.name == "nt":
+        return
+    for d in dirs:
+        try:
+            st = d.stat()
+            if st.st_uid == os.getuid() and st.st_mode & 0o077:
+                os.chmod(d, 0o700)
+        except OSError:
+            pass
 
 
 def atomic_write_text(path: Path, text: str) -> None:

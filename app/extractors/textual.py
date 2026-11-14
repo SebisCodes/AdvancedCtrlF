@@ -15,7 +15,7 @@ from xml.parsers import expat
 
 from .. import lang as langmod
 from .base import (Chunker, Context, ExtractError, Result, add_lines, clean, decode_bytes,
-                   safe_xml)
+                   read_member, safe_xml)
 from .ooxml import col_letter
 
 MAX_TEXT_BYTES = 300 * 1024 * 1024
@@ -185,7 +185,8 @@ class _HtmlText(HTMLParser):
 # Many "app-like" HTML files (editors, exported reports, single-page apps) ship an
 # empty container plus a script that builds the page. A browser's Ctrl+F finds that
 # text because it runs the script; we approximate it by reading the string literals.
-_JS_TOKEN = re.compile(r"""//[^\n]*|/\*.*?\*/|'(?:\\.|[^'\\\n])*'|"(?:\\.|[^"\\\n])*"|`(?:\\.|[^`\\])*`""", re.S)
+_JS_START = re.compile(r"//|/\*|['\"`]")
+_JS_STOP = {"'": re.compile(r"[\\'\n]"), '"': re.compile(r'[\\"\n]'), "`": re.compile(r"[\\`]")}
 _JS_ESC = re.compile(r"\\(u\{[0-9a-fA-F]+\}|u[0-9a-fA-F]{4}|x[0-9a-fA-F]{2}|.)", re.S)
 _JS_SIMPLE = {"n": "\n", "t": "\t", "r": "", "b": "", "f": "", "v": "", "0": ""}
 _CODE_LIKE = re.compile(r"=>|=\"|\bon[a-z]+=|[{};]\s*$|^\s*[.#]?[\w-]+\s*\{|\bfunction\b|\breturn\b|^[\w.$-]+\(|"
@@ -227,21 +228,61 @@ def _strip_tag_fragments(s: str) -> str:
     return _TAG_HEAD.sub(" ", s)
 
 
+def _js_strings(code: str):
+    """(offset, literal incl. quotes) of the string literals in `code`, comments skipped.
+    Like the former regular expression, an unterminated quote (e.g. inside a regex literal
+    /'/) is skipped and scanning goes on right after it. That it is unterminated also holds for
+    every later quote of the same kind up to where its scan ended (`dead`), so those are not
+    scanned again: one pass, no quadratic work with many unterminated quotes or comments."""
+    pos, n = 0, len(code)
+    dead: dict[str, int] = {}
+    while pos < n:
+        m = _JS_START.search(code, pos)
+        if not m:
+            return
+        start, tok = m.start(), m.group()
+        if start < dead.get(tok, -1):        # known to be unterminated
+            pos = start + 1
+            continue
+        if tok == "//":
+            end = code.find("\n", start)
+            pos = n if end < 0 else end + 1
+            continue
+        if tok == "/*":
+            end = code.find("*/", start + 2)
+            if end < 0:
+                dead[tok], pos = n, start + 2
+            else:
+                pos = end + 2
+            continue
+        stop, i = _JS_STOP[tok], start + 1
+        while True:
+            e = stop.search(code, i)
+            if e is not None and e.group() == "\\":
+                i = e.end() + 1              # escaped character
+                continue
+            if e is None or e.group() == "\n":   # unterminated ('...' and "..." end at a line break)
+                dead[tok], pos = (n if e is None else e.start()), start + 1
+            else:
+                pos = e.end()
+                yield start, code[start:pos]
+            break
+
+
 def script_pairs(scripts: list[tuple[int, str]]) -> list[tuple[int, str]]:
     """Readable text from string literals inside <script> blocks, with source lines."""
     out: list[tuple[int, str]] = []
     for start_line, code in scripts:
-        for m in _JS_TOKEN.finditer(code):
-            tok = m.group()
-            if tok[0] not in "'\"`":
-                continue  # comment
+        line, counted = start_line, 0         # line breaks counted up to `counted` (incrementally)
+        for offset, tok in _js_strings(code):
+            line += code.count("\n", counted, offset)
+            counted = offset
             body = tok[1:-1]
             if tok[0] == "`":
-                body = re.sub(r"\$\{[^}]*\}", " ", body)
+                body = re.sub(r"\$\{[^}]*\}?", " ", body)   # "}?": an unclosed ${ ends the work, no rescans
             if "base64," in body[:200] or len(body) < 3:
                 continue
             body = _strip_tag_fragments(_JS_ESC.sub(_js_unescape, body))
-            line = start_line + code.count("\n", 0, m.start())
             if "<" in body and ">" in body:  # HTML snippet inside a string
                 inner = _HtmlText()
                 inner.feed(body)
@@ -415,9 +456,9 @@ def extract_epub(path: Path, ctx: Context) -> Result:
         names = set(z.namelist())
         order: list[str] = []
         try:
-            cont = safe_xml(z.read("META-INF/container.xml"))
+            cont = safe_xml(read_member(z, "META-INF/container.xml"))
             opf_path = next(el.get("full-path") for el in cont.iter() if el.tag.endswith("rootfile"))
-            opf = safe_xml(z.read(opf_path))
+            opf = safe_xml(read_member(z, opf_path))
             base = posixpath.dirname(opf_path)
             items = {el.get("id"): el.get("href") for el in opf.iter() if el.tag.endswith("}item")}
             for ref in opf.iter():
@@ -425,8 +466,15 @@ def extract_epub(path: Path, ctx: Context) -> Result:
                     order.append(posixpath.normpath(posixpath.join(base, items[ref.get("idref")])))
         except Exception:
             order = sorted(n for n in names if n.endswith((".xhtml", ".html", ".htm")))
+        total = 0
         for chap, name in enumerate((n for n in order if n in names), 1):
-            pairs, _ = html_pairs(decode_bytes(z.read(name)))
+            if ctx.cancelled():
+                raise ExtractError("Cancelled")
+            info = z.getinfo(name)
+            total += info.file_size
+            if total > MAX_TEXT_BYTES:       # all chapters together, uncompressed
+                raise ExtractError("EPUB too large")
+            pairs, _ = html_pairs(decode_bytes(read_member(z, info)))
             chunks += chunk_lines(pairs, {"kind": "chapter", "chapter": chap})
     return Result(chunks, {"pages": len(order), "language": _lang(chunks)})
 

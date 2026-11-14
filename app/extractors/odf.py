@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .. import lang as langmod
 from ..ocr import ImageOCR
-from .base import Chunker, Context, ExtractError, Result, safe_xml
+from .base import Chunker, Context, ExtractError, Result, read_member, safe_xml
 from .ooxml import MAX_ROWS, add_row, col_letter
 
 NS = {
@@ -29,6 +29,14 @@ TEXT_BLOCKS = {q("text", "p"), q("text", "h")}
 SKIP = {q("text", "tracked-changes"), q("office", "annotation")}
 
 
+def _spaces(count) -> int:
+    """<text:s text:c="n"/>: n spaces - bounded, a document must not make us allocate gigabytes."""
+    try:
+        return max(1, min(int(count or 1), 100))
+    except ValueError:
+        return 1
+
+
 def _inline_text(el) -> str:
     """Text of a paragraph including <text:s/>, <text:tab/>, <text:line-break/>."""
     out = [el.text or ""]
@@ -36,7 +44,7 @@ def _inline_text(el) -> str:
         if child.tag in SKIP:
             pass
         elif child.tag == q("text", "s"):
-            out.append(" " * int(child.get(q("text", "c"), "1") or 1))
+            out.append(" " * _spaces(child.get(q("text", "c"))))
         elif child.tag == q("text", "tab"):
             out.append("\t")
         elif child.tag == q("text", "line-break"):
@@ -82,7 +90,7 @@ def _ocr_pictures(path: Path, ch: Chunker, items: list[tuple[str, dict]], ctx: C
                 raise ExtractError("Cancelled")
             if href not in names or z.getinfo(href).file_size > 100 * 1024 * 1024:
                 continue
-            text = images.read(href, lambda h=href: z.read(h))
+            text = images.read(href, lambda h=href: read_member(z, h, 100 * 1024 * 1024))
             if text:
                 ch.add(text, dict(loc, part="Image (OCR)"))
     return {"ocr_images": images.count, "ocr_skipped": images.skipped}
@@ -91,10 +99,7 @@ def _ocr_pictures(path: Path, ch: Chunker, items: list[tuple[str, dict]], ctx: C
 def _content(path: Path) -> object:
     try:
         with zipfile.ZipFile(path) as z:
-            info = z.getinfo("content.xml")
-            if info.file_size > 200 * 1024 * 1024:
-                raise ExtractError("content.xml too large")
-            return safe_xml(z.read(info))
+            return safe_xml(read_member(z, "content.xml"))
     except (zipfile.BadZipFile, KeyError) as e:
         raise ExtractError("Not a valid OpenDocument file") from e
 

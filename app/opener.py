@@ -15,6 +15,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 from . import config as cfg
+from .net import windows_exe
 
 log = logging.getLogger(__name__)
 IS_WIN = sys.platform.startswith("win")
@@ -33,11 +34,46 @@ SAFE_OPEN = {
 }
 MACRO_CAPABLE = {".docm", ".dotm", ".doc", ".dot", ".xlsm", ".xltm", ".xlsb", ".xls", ".xlt", ".xlam",
                  ".pptm", ".potm", ".ppsm", ".ppt", ".pps", ".pot", ".ppam"}
+# OpenDocument files are only opened when they contain no macros or scripts (Basic/, Scripts/)
+ODF = {".odt", ".ott", ".ods", ".ots", ".odp", ".otp", ".odg", ".otg"}
 # Plain-text files that can safely be opened in an editor at a given line
 TEXT_LINE = {".txt", ".md", ".log", ".csv", ".tsv", ".json", ".xml", ".yaml", ".yml", ".ini", ".toml", ".py",
              ".js", ".ts", ".sql", ".css", ".tex", ".sh", ".bat", ".ps1", ".c", ".h", ".cpp", ".java", ".cs",
              ".go", ".rs", ".php", ".rb", ".conf", ".cfg"}
 HTML = {".html", ".htm", ".xhtml"}
+
+
+# Script code in the package, events bound to scripts, or links that call a macro
+# (not "<office:scripts/>": LibreOffice writes that empty element into almost every document)
+_ODF_SCRIPT_MARKS = (b"script:event-listener", b"<office:script ", b"<office:script>", b"vnd.sun.star.script:",
+                     b"macro://")
+
+
+def odf_has_macros(path: Path) -> bool:
+    """True if an OpenDocument package carries macros/scripts, binds events or links to them -
+    or cannot be checked completely (broken, unusual compression, very large XML parts)."""
+    import zipfile
+    from .extractors.base import ExtractError, open_member
+    try:
+        with zipfile.ZipFile(path) as z:
+            for info in z.infolist():
+                name = info.filename.replace("\\", "/").lstrip("/")
+                if name.split("/", 1)[0].lower() in ("basic", "scripts"):
+                    return True
+                if not name.lower().endswith(".xml"):
+                    continue
+                if info.file_size > 200 * 1024 * 1024:
+                    return True
+                tail = b""
+                with open_member(z, info) as f:          # streamed: bounded memory
+                    while block := f.read(1 << 20):
+                        data = (tail + block).lower()
+                        if any(mark in data for mark in _ODF_SCRIPT_MARKS):
+                            return True
+                        tail = data[-32:]
+        return False
+    except (zipfile.BadZipFile, OSError, ValueError, ExtractError, EOFError, RuntimeError):
+        return True
 
 
 def _which(*names: str) -> str | None:
@@ -196,8 +232,11 @@ def open_document(path: Path, target: dict | None, preferred_pdf: str = "", high
         for cmd in _editors(path, int(line)):
             if _spawn(cmd):
                 return True, f"Opened at line {line}"
-    if ext not in SAFE_OPEN:
+    if ext not in SAFE_OPEN or (ext in ODF and odf_has_macros(path)):
         show_in_folder(path)
+        if ext in ODF:
+            return True, ("This document contains macros or scripts and is not opened from here - folder "
+                          "opened instead. Open it yourself only if you trust it.")
         if ext in MACRO_CAPABLE:
             return True, ("Office files that can contain macros are not opened from here - folder opened "
                           "instead. Open it yourself only if you trust it.")
@@ -222,7 +261,8 @@ def show_in_folder(path: Path) -> None:
         # understand that and opens the default "Documents" folder instead (e.g. with OneDrive paths).
         # Windows paths cannot contain quotes, so this string is safe.
         target = str(path.resolve())
-        cmd = f'explorer /select,"{target}"' if path.is_file() else f'explorer "{target}"'
+        explorer = windows_exe("explorer.exe")      # absolute: never a program from the current folder
+        cmd = f'"{explorer}" /select,"{target}"' if path.is_file() else f'"{explorer}" "{target}"'
         try:
             subprocess.Popen(cmd, creationflags=0x00000008 | 0x00000200)
             log.info("Started %s", cmd)
