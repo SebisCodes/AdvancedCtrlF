@@ -55,7 +55,9 @@ jobs:
           }
 
       - name: Unit tests
-        run: $PY -I -W ignore tests/test_all.py
+        run: |
+          $PY -I -W ignore tests/test_all.py 2>&1 | tee unit-tests.txt
+          test "${PIPESTATUS[0]}" = 0
 
       - name: GUI smoke test
         run: $PY -I -W ignore tests/smoke_gui.py
@@ -101,4 +103,9 @@ jobs:
           if [ -f data/setup.log ]; then
             msg=$(tail -n 40 data/setup.log | tr -d '\r' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
             echo "::error title=setup.log (${{ runner.os }})::$msg"
+          fi
+          # failed tests: only the tracebacks, without the progress lines
+          if [ -f unit-tests.txt ] && grep -Eq '^(FAILED|ERROR:|FAIL:)' unit-tests.txt; then
+            msg=$(awk '/^(ERROR|FAIL): /{p=1} p' unit-tests.txt | tail -n 120 | tr -d '\r' | sed 's/%/%25/g' | awk '{printf "%s%%0A", $0}')
+            echo "::error title=Unit tests (${{ runner.os }})::$msg"
           fi
